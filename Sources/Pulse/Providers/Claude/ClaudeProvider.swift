@@ -3,7 +3,7 @@ import Foundation
 /// Claude usage: live rate-limit windows from the OAuth usage endpoint (the
 /// same one Claude Code's `/usage` calls) plus exact token/cost history from
 /// the local project logs.
-actor ClaudeProvider: UsageProvider {
+actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
     nonisolated let id: ProviderID = .claude
     nonisolated let descriptor = ProviderDescriptor(
         id: .claude,
@@ -72,6 +72,24 @@ actor ClaudeProvider: UsageProvider {
             throw Self.moreInformative(limitsError, logsError)
         }
         return snapshot
+    }
+
+    // MARK: - Project / session breakdown
+
+    /// Per-project/session usage from the local logs, reusing the same warm
+    /// cache `fetch()` fills. Costs are shown (computed from the pricing table).
+    func projectBreakdown(timeframe: BreakdownTimeframe, now: Date = .now) async -> ProjectBreakdown? {
+        let projects = await parser.breakdown(timeframe: timeframe, now: now)
+        guard !projects.isEmpty else { return nil }
+        let grandTotal = projects.reduce(into: TokenTotals()) { $0.add($1.totals) }
+        return ProjectBreakdown(
+            providerID: id,
+            timeframe: timeframe,
+            generatedAt: now,
+            projects: projects,
+            grandTotal: grandTotal,
+            showsCost: true
+        )
     }
 
     // MARK: - Live limits

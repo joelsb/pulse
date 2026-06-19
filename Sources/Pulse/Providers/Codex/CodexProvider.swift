@@ -2,7 +2,7 @@ import Foundation
 
 /// OpenAI Codex CLI usage: live ChatGPT-account rate limits (wham/usage) with
 /// a session-log fallback, plus token history parsed from local session files.
-actor CodexProvider: UsageProvider {
+actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
     nonisolated let id: ProviderID = .codex
     nonisolated let descriptor = ProviderDescriptor(
         id: .codex,
@@ -88,6 +88,24 @@ actor CodexProvider: UsageProvider {
             break
         }
         return snapshot
+    }
+
+    // MARK: - Project / session breakdown
+
+    /// Per-project/session token usage from the local session files, reusing the
+    /// same warm cache `fetch()` fills. No cost column — Codex is plan-included.
+    func projectBreakdown(timeframe: BreakdownTimeframe, now: Date = .now) async -> ProjectBreakdown? {
+        let projects = await parser.breakdown(timeframe: timeframe, now: now)
+        guard !projects.isEmpty else { return nil }
+        let grandTotal = projects.reduce(into: TokenTotals()) { $0.add($1.totals) }
+        return ProjectBreakdown(
+            providerID: id,
+            timeframe: timeframe,
+            generatedAt: now,
+            projects: projects,
+            grandTotal: grandTotal,
+            showsCost: false
+        )
     }
 
     /// Session-log snapshots use `window_minutes` + epoch-second `resets_at`

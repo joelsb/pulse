@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-06-19 v1.1.0
+
+### Usage Breakdown by project & session (new)
+- **Per-project / per-session ("thread") breakdown** for **Claude** and **Codex**
+  — a dedicated resizable window grouping your local CLI usage by working
+  directory, with drill-down to individual sessions ("which instance used how
+  many tokens, and what did it cost"). Open it with **⌘B**, the chart button in
+  the panel's bottom bar, or right-click the menu-bar item → *Usage Breakdown…*.
+- Tokens for both providers; **$ cost for Claude** (computed from the pricing
+  table — Codex is plan-included, so it shows tokens only). Timeframe **7 days /
+  30 days / 1 year**, sortable by tokens / cost / recent / name.
+- **"Active now"** badge for sessions touched in the last few minutes; the window
+  auto-refreshes while it's focused (and pauses when hidden).
+- Friendly session names from the CLI's own generated title (Claude's `ai-title`),
+  falling back to project + git branch + start time. A Settings toggle
+  (**Show session titles**) keeps the breakdown strictly content-blind when off.
+- Only Claude & Codex expose a project dimension locally; Cursor, Copilot, and
+  Gemini have no per-project data to attribute and are intentionally absent here.
+- Architecture: a capability-shaped `ProjectBreakdownProviding` on the local-log
+  providers plus an on-demand `ProjectUsageService`, reusing the live refresh's
+  warm aggregation cache so the breakdown adds no work to the hot path.
+
+### Also
+
+- Settings → About now reads the version from the bundle, so it can't drift from
+  the shipped build.
+- Test suite grows to **186 unit tests** (breakdown parsing, project/session
+  rollups, the analytics service, persisted preferences, and the demo dataset).
+
 ## 2026-06-10 v1.0.1
 
 - New app icon: the Byte "B" mark on the brand acid-orange plate, matching the

@@ -113,4 +113,17 @@ enum UsageMath {
             return DailyUsage(date: bucket, totals: hourlyTotals[bucket] ?? .zero)
         }
     }
+
+    /// `ModelShare` rows from per-model totals, each share a percentage of the
+    /// set's own grand total, sorted descending (ties broken by name for a
+    /// stable order). Keys are expected to already be display names.
+    static func modelShares(_ perModel: [String: TokenTotals]) -> [ModelShare] {
+        let total = perModel.values.reduce(Int64(0)) { $0 + $1.total }
+        let denominator = Double(max(total, 1))
+        return perModel
+            .map { ModelShare(model: $0.key, share: Double($0.value.total) / denominator * 100, totals: $0.value) }
+            .sorted { lhs, rhs in
+                lhs.share == rhs.share ? lhs.model < rhs.model : lhs.share > rhs.share
+            }
+    }
 }

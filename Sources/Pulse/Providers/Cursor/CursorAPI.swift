@@ -6,7 +6,7 @@ import Foundation
 /// unknown paths, so JSON responses are detected before decoding.
 struct CursorAPI: Sendable {
     static let base = URL(string: "https://cursor.com")!
-    private static let userAgent = "Pulse/1.0"
+    private static let userAgent = "Pulse/1.1"
 
     var http: HTTPClient
 

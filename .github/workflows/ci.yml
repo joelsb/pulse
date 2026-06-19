@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build & test
+    # Pulse targets macOS 26 with the Swift 6.2 toolchain, and `swift test` *runs*
+    # the suite, so it needs a macOS 26 runner (the test binary won't launch on an
+    # older OS). If your org doesn't have the `macos-26` image yet, this job waits
+    # for a matching runner — bump the label once GitHub publishes it.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          swift --version
+          xcodebuild -version || true
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test

@@ -26,6 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 statusController?.showPanelForDebug()
             }
         }
+        if ProcessInfo.processInfo.arguments.contains("--show-breakdown") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [statusController] in
+                statusController?.showBreakdownForDebug()
+            }
+        }
         if ProcessInfo.processInfo.arguments.contains("--dump-status") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [statusController] in
                 statusController?.dumpStatusForDebug()

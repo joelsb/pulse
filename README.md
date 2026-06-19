@@ -20,12 +20,33 @@ Electron, no accounts, no telemetry.
 - **Histogram** — click the badge to switch 1 day (hourly) / 7d / 30d / 1 year
 - **Token table** — Today & This Month × Input / Output / Cache / Cost, with a
   per-model breakdown
+- **Usage breakdown** (⌘B) — a separate window that splits **Claude & Codex**
+  usage by project (working directory) and drills into individual
+  sessions/threads, with an "Active now" badge for live instances; tokens for
+  both, cost for Claude
 - Native macOS 26 look: vibrancy panel, light/dark palettes (accessible
   contrast in light mode), Reduce Motion respected
 
+### Usage breakdown by project & session
+
+Press **⌘B** (or the chart button in the panel) to see exactly which project —
+and which session/thread — spent what. Group Claude & Codex usage by working
+directory, drill into individual runs, and spot live instances at a glance.
+
+<p align="center">
+  <img src="docs/assets/breakdown-light.png" width="410" alt="Byte Pulse — Usage Breakdown window, light mode" />
+  <img src="docs/assets/breakdown-dark.png" width="410" alt="Byte Pulse — Usage Breakdown window, dark mode" />
+</p>
+
 ## Install
 
-Requires **macOS 26+** (Apple Silicon) and **Xcode 26** for building.
+**Download** (easiest): grab `Byte-Pulse.dmg` from the
+[latest release](https://github.com/Byte-de/pulse/releases/latest), open it, and
+drag **Pulse** into Applications. Requires **macOS 26+** (Apple Silicon). The app
+is open-source and ad-hoc signed (no paid Developer ID), so macOS asks once on
+first launch — **right-click Pulse → Open** to confirm.
+
+**Or build from source** (needs **Xcode 26** / Swift 6.2):
 
 ```sh
 git clone https://github.com/Byte-de/pulse.git && cd pulse
@@ -55,9 +76,10 @@ computed from token counts).
 
 ## Settings & shortcuts
 
-Launch at login, refresh cadence (30s–5m), menu-bar style, and per-provider
-toggles live in Settings (⌘,). In the panel: ←/→ or ⌘1–5 switch tabs, ⌘R
-refreshes, esc or `–` minimizes, `×` quits.
+Launch at login, refresh cadence (30s–5m), menu-bar style, per-provider
+toggles, and the breakdown's session-title visibility live in Settings (⌘,). In
+the panel: ←/→ or ⌘1–5 switch tabs, ⌘R refreshes, ⌘B opens the usage breakdown,
+esc or `–` minimizes, `×` quits.
 
 ## Custom icons
 

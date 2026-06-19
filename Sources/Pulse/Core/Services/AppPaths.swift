@@ -24,6 +24,14 @@ enum AppPaths {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
+
+    /// "/Users/me/Code/x" → "~/Code/x" for display. Only the exact home prefix
+    /// is collapsed; unrelated paths pass through unchanged.
+    static func abbreviatingHome(_ path: String) -> String {
+        let homePath = home.path
+        guard path == homePath || path.hasPrefix(homePath + "/") else { return path }
+        return "~\(path.dropFirst(homePath.count))"
+    }
 }
 
 /// Identity + change detection for a file feeding an incremental aggregation.

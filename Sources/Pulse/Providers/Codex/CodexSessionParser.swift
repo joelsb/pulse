@@ -9,7 +9,7 @@ import Foundation
 /// `turn_context`. OpenAI counts cached tokens as a subset of `input_tokens`
 /// and reasoning as part of `output_tokens`, so display input = input − cached.
 struct CodexSessionParser: Sendable {
-    /// Per-file aggregate persisted by `FileAggregationCache`.
+    /// Per-file aggregate persisted by `FileAggregationCache` (1 file = 1 session).
     struct FileAggregate: Codable, Sendable {
         /// "yyyy-MM-dd" derived from the session file's path date.
         var dayKey: String
@@ -17,6 +17,15 @@ struct CodexSessionParser: Sendable {
         var models: [String: Tokens]
         /// Newest rate-limit snapshot in the file (limit_id == "codex").
         var rateLimits: RateLimitSnapshot?
+        /// Working directory recorded in the session (project attribution for
+        /// the breakdown; unused by the aggregate token card).
+        var cwd: String?
+        /// Session id (the rollout's `session_meta.id`, else the file UUID).
+        var sessionID: String?
+        /// Activity span, for breakdown sorting + the minute-accurate "Active
+        /// now" signal (the day-granular `dayKey` is too coarse for liveness).
+        var firstActivity: Date?
+        var lastActivity: Date?
 
         struct Tokens: Codable, Sendable {
             var input: Int64 = 0
@@ -40,7 +49,7 @@ struct CodexSessionParser: Sendable {
 
     init(
         sessionsRoot: URL = AppPaths.home.appendingPathComponent(".codex/sessions"),
-        cacheName: String = "codex-files"
+        cacheName: String = "codex-files-v2"
     ) {
         self.sessionsRoot = sessionsRoot
         self.cache = FileAggregationCache(name: cacheName)
@@ -78,13 +87,30 @@ struct CodexSessionParser: Sendable {
         var currentModel = "gpt-5"
         var previous = TotalTokenUsage()
         var newestLimits: RateLimitSnapshot?
+        var cwd: String?
+        var sessionID: String?
+        var firstActivity: Date?
+        var lastActivity: Date?
 
         try JSONLines.forEachLine(of: url) { line in
             // Cheap prefilter keeps conversation content out of the decoder.
             let isTokenCount = line.contains("token_count")
             let isTurnContext = line.contains("turn_context")
-            guard isTokenCount || isTurnContext else { return }
+            let isSessionMeta = line.contains("session_meta")
+            guard isTokenCount || isTurnContext || isSessionMeta else { return }
             guard let event = JSONLines.decode(SessionLine.self, from: line) else { return }
+
+            // Activity span across every decoded structural line.
+            let date = event.timestamp.flatMap(Self.parseISO)
+            if let date {
+                if firstActivity == nil || date < firstActivity! { firstActivity = date }
+                if lastActivity == nil || date > lastActivity! { lastActivity = date }
+            }
+
+            // Identity: session_meta is canonical (cwd + id, logged first);
+            // turn_context's cwd is a fallback for sessions without meta.
+            if let payloadCwd = event.payload?.cwd, !payloadCwd.isEmpty, cwd == nil { cwd = payloadCwd }
+            if isSessionMeta, let id = event.payload?.id, !id.isEmpty { sessionID = id }
 
             if isTurnContext, let model = event.payload?.model, !model.isEmpty {
                 currentModel = model
@@ -111,10 +137,10 @@ struct CodexSessionParser: Sendable {
             if let limits = event.payload?.rateLimits,
                limits.limitID == nil || limits.limitID == "codex",
                limits.primary != nil {
-                let date = event.timestamp.flatMap(Self.parseISO) ?? .now
-                if newestLimits == nil || date >= newestLimits!.date {
+                let limitDate = date ?? .now
+                if newestLimits == nil || limitDate >= newestLimits!.date {
                     newestLimits = RateLimitSnapshot(
-                        date: date,
+                        date: limitDate,
                         primaryUsedPercent: limits.primary?.usedPercent,
                         primaryWindowMinutes: limits.primary?.windowMinutes,
                         primaryResetsAtEpoch: limits.primary?.resetsAt,
@@ -129,8 +155,23 @@ struct CodexSessionParser: Sendable {
         return FileAggregate(
             dayKey: dayKey(forSessionFile: url),
             models: models,
-            rateLimits: newestLimits
+            rateLimits: newestLimits,
+            cwd: cwd,
+            sessionID: sessionID ?? Self.sessionID(forSessionFile: url),
+            firstActivity: firstActivity,
+            lastActivity: lastActivity
         )
+    }
+
+    /// Extracts the session UUID from a `rollout-<timestamp>-<uuid>.jsonl`
+    /// filename, falling back to the full stem when the shape is unexpected.
+    static func sessionID(forSessionFile url: URL) -> String {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let uuid = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#
+        if let range = stem.range(of: uuid, options: .regularExpression) {
+            return String(stem[range])
+        }
+        return stem
     }
 
     /// The sessions tree is `YYYY/MM/DD/rollout-*.jsonl`; the directory date is
@@ -214,6 +255,67 @@ struct CodexSessionParser: Sendable {
         )
     }
 
+    // MARK: - Project / session breakdown
+
+    /// Per-project/session usage over `timeframe`, reusing the warm cache the
+    /// live `report()` fills. Codex aggregates per file at day granularity, so
+    /// whole sessions are included/excluded by their `dayKey`.
+    func breakdown(timeframe: BreakdownTimeframe, now: Date = .now) async -> [ProjectUsage] {
+        let calendar = Calendar.current
+        let since = now.addingTimeInterval(-366 * 24 * 3600)
+        let files = FileSnapshot.enumerate(root: sessionsRoot, pathExtension: "jsonl", modifiedSince: since)
+        guard !files.isEmpty else { return [] }
+        let aggregates = await cache.aggregates(for: files) { try Self.aggregate(file: $0) }
+        return Self.rollUpBreakdown(aggregates, timeframe: timeframe, calendar: calendar, now: now)
+    }
+
+    /// Groups cached sessions into projects by `cwd`. Empty or out-of-frame
+    /// sessions are dropped; cost stays nil (Codex usage is plan-included).
+    static func rollUpBreakdown(
+        _ aggregates: [FileAggregate],
+        timeframe: BreakdownTimeframe,
+        calendar: Calendar,
+        now: Date,
+        liveThreshold: TimeInterval = 5 * 60
+    ) -> [ProjectUsage] {
+        let formatter = dayFormatter(calendar: calendar)
+        let today = calendar.startOfDay(for: now)
+        let cutoffDate = calendar.date(byAdding: .day, value: -(timeframe.days - 1), to: today) ?? today
+        let cutoffDay = formatter.string(from: cutoffDate)
+
+        var aggregator = ProjectUsageAggregator()
+        for aggregate in aggregates where aggregate.dayKey >= cutoffDay {
+            var totals = TokenTotals()
+            var perModel: [String: TokenTotals] = [:]
+            for (model, tokens) in aggregate.models {
+                let display = displayTotals(tokens)
+                totals.add(display)
+                perModel[ModelNames.display(model), default: .zero].add(display)
+            }
+            guard totals.total > 0 else { continue }
+
+            let lastActivity = aggregate.lastActivity ?? formatter.date(from: aggregate.dayKey) ?? now
+            let key = aggregate.cwd ?? "unknown"
+            let session = SessionUsage(
+                id: aggregate.sessionID ?? "\(key)-\(aggregate.dayKey)",
+                title: nil,
+                gitBranch: nil,
+                totals: totals,
+                startedAt: aggregate.firstActivity,
+                lastActivity: lastActivity,
+                isActive: now.timeIntervalSince(lastActivity) < liveThreshold,
+                modelBreakdown: UsageMath.modelShares(perModel)
+            )
+            aggregator.add(
+                session,
+                projectKey: key,
+                displayPath: ProjectDisplay.displayPath(cwd: aggregate.cwd, fallback: "Unknown project"),
+                name: ProjectDisplay.name(cwd: aggregate.cwd, fallback: "Unknown project")
+            )
+        }
+        return aggregator.projects()
+    }
+
     /// Display mapping: cached prompt tokens are a subset of `input_tokens`,
     /// so the Input column shows the uncached remainder; Codex usage is plan-
     /// included, so cost stays nil.
@@ -273,9 +375,12 @@ private struct SessionLine: Decodable {
         var model: String?
         var info: Info?
         var rateLimits: RateLimits?
+        /// Present on `session_meta` (canonical) and `turn_context`.
+        var id: String?
+        var cwd: String?
 
         enum CodingKeys: String, CodingKey {
-            case type, model, info
+            case type, model, info, id, cwd
             case rateLimits = "rate_limits"
         }
     }

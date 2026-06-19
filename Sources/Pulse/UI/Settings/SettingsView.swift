@@ -9,6 +9,12 @@ struct SettingsView: View {
     private var settings: SettingsStore { environment.settings }
     private var store: UsageStore { environment.store }
 
+    /// Shipped version from the bundle's Info.plist — the single source of
+    /// truth (set by build-app.sh), so the About row never drifts from the build.
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
     var body: some View {
         @Bindable var settings = settings
 
@@ -52,6 +58,17 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Usage Breakdown") {
+                Toggle(isOn: $settings.useSessionTitles) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Show session titles")
+                        Text("Uses the short titles your CLI already generates (e.g. Claude's), read only on your Mac. Off keeps the breakdown strictly content-blind.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -61,7 +78,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text("1.0.0")
+                    Text(appVersion)
                         .font(.system(size: 11).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }

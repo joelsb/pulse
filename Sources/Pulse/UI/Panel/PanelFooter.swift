@@ -96,6 +96,7 @@ struct PanelFooter: View {
 struct PanelBottomBar: View {
     let providerName: String
     let openProvider: () -> Void
+    let openBreakdown: () -> Void
     let openSettings: () -> Void
     let minimize: () -> Void
     let quit: () -> Void
@@ -105,6 +106,7 @@ struct PanelBottomBar: View {
             HStack(spacing: 4) {
                 BarButton(title: "Open \(providerName)", tint: PulseColor.info, action: openProvider)
                 Spacer()
+                GhostIconButton(systemImage: "chart.bar.xaxis", help: "Usage by project · session (⌘B)", action: openBreakdown)
                 BarButton(title: "Settings", action: openSettings)
                 GhostIconButton(systemImage: "minus", help: "Minimize — Pulse stays in the menu bar (esc)", action: minimize)
                 GhostIconButton(systemImage: "xmark", help: "Quit Pulse (⌘Q)", action: quit)
