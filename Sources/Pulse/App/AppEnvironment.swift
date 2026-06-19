@@ -9,12 +9,18 @@ final class AppEnvironment {
     let history: HistoryStore
     let providers: [any UsageProvider]
     let scheduler: RefreshScheduler
+    /// On-demand per-project/session analytics for the breakdown window. Shares
+    /// the provider instances (and their warm caches) with the scheduler.
+    let projectUsage: ProjectUsageService
+    /// True when launched with `--demo-data`: the breakdown shows Byte-branded
+    /// mock data instead of the user's logs (for screenshots and demos).
+    let isDemoData = ProcessInfo.processInfo.arguments.contains("--demo-data")
 
     init() {
         let settings = SettingsStore()
         let store = UsageStore()
         let history = HistoryStore()
-        let providers = ProviderFactory.makeAll()
+        let providers = ProviderFactory.makeAll(captureTitles: settings.useSessionTitles)
 
         self.settings = settings
         self.store = store
@@ -26,6 +32,9 @@ final class AppEnvironment {
             history: history,
             settings: settings
         )
+        self.projectUsage = isDemoData
+            ? ProjectUsageService(breakdownProviders: DemoBreakdownProvider.all)
+            : ProjectUsageService(providers: providers)
     }
 
     func descriptor(for id: ProviderID) -> ProviderDescriptor {

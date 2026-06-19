@@ -21,6 +21,10 @@ final class SettingsStore {
         static let selectedTab = "selectedTab"
         static let dailyTimeframe = "dailyTimeframe"
         static let knownProviders = "knownProviders"
+        static let breakdownProvider = "breakdownProvider"
+        static let breakdownTimeframe = "breakdownTimeframe"
+        static let breakdownSort = "breakdownSort"
+        static let useSessionTitles = "useSessionTitles"
     }
 
     private let defaults: UserDefaults
@@ -54,6 +58,30 @@ final class SettingsStore {
         didSet { defaults.set(dailyTimeframe.rawValue, forKey: Key.dailyTimeframe) }
     }
 
+    // MARK: - Breakdown window
+
+    /// Last provider selected in the breakdown window.
+    var breakdownProvider: ProviderID {
+        didSet { defaults.set(breakdownProvider.rawValue, forKey: Key.breakdownProvider) }
+    }
+
+    /// Last timeframe selected in the breakdown window.
+    var breakdownTimeframe: BreakdownTimeframe {
+        didSet { defaults.set(breakdownTimeframe.rawValue, forKey: Key.breakdownTimeframe) }
+    }
+
+    /// Last project sort selected in the breakdown window.
+    var breakdownSort: BreakdownSort {
+        didSet { defaults.set(breakdownSort.rawValue, forKey: Key.breakdownSort) }
+    }
+
+    /// Whether the breakdown may show CLI-generated session titles (Claude's
+    /// `ai-title`). When false, Pulse stays strictly content-blind: title
+    /// records are never even decoded. Default on (the user opted into titles).
+    var useSessionTitles: Bool {
+        didSet { defaults.set(useSessionTitles, forKey: Key.useSessionTitles) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -81,6 +109,15 @@ final class SettingsStore {
 
         dailyTimeframe = defaults.string(forKey: Key.dailyTimeframe)
             .flatMap(UsageTimeframe.init(rawValue:)) ?? .week
+
+        breakdownProvider = defaults.string(forKey: Key.breakdownProvider)
+            .flatMap(ProviderID.init(rawValue:)) ?? .claude
+        breakdownTimeframe = defaults.string(forKey: Key.breakdownTimeframe)
+            .flatMap(BreakdownTimeframe.init(rawValue:)) ?? .last30Days
+        breakdownSort = defaults.string(forKey: Key.breakdownSort)
+            .flatMap(BreakdownSort.init(rawValue:)) ?? .tokens
+        // Default on: the user opted into CLI-generated titles in the design phase.
+        useSessionTitles = (defaults.object(forKey: Key.useSessionTitles) as? Bool) ?? true
 
         // Providers introduced by an app update default to enabled+visible even
         // when older persisted selections predate them (e.g. Copilot arriving

@@ -8,7 +8,7 @@ nothing leaves the machine except calls to those APIs.
 ## Layers
 
 ```
-App/        lifecycle, status item, floating panel, settings window (AppKit shell)
+App/        lifecycle, status item, floating panel, settings + breakdown windows (AppKit shell)
 UI/         SwiftUI views: design system, cards, charts, tab bar (per docs/DESIGN.md)
 Providers/  one engine per provider (actor), conforming to UsageProvider
 Core/       models, contracts, shared services — no AppKit/SwiftUI above Foundation
@@ -60,6 +60,26 @@ model.
 - **Usage rate chart** — Δ utilization per 15-min bucket over the last 5h.
 - **Pace** — `used / expected(elapsed)` with absolute floors (≥95% critical,
   ≥85% elevated). See `Pace.evaluate` + tests.
+
+## On-demand breakdown (by project / session)
+
+The breakdown window (per-project / per-session usage) is a deliberate sibling to
+the live dashboard, not part of it. Providers whose local data carries a project
+dimension — Claude (`cwd` + one JSONL per session) and Codex
+(`session_meta.cwd`) — conform to `ProjectBreakdownProviding`; `ProjectUsageService`
+(a Core actor) answers `breakdown(for:timeframe:)` on demand, holding the *same*
+provider instances the scheduler drives, so it reuses their **warm**
+`FileAggregationCache` — a breakdown query never re-parses the log tree, and the
+refresh hot path is untouched. Each parser gained a `breakdown(timeframe:)` that
+rolls the cached per-session aggregates up by project over the *same* enumeration
+window as `report()` (so the shared cache never thrashes); `report()` itself is
+unchanged (it just flattens the richer per-session aggregate's entries). The
+window (`BreakdownWindowController`, modeled on Settings; cached, resizable)
+auto-refreshes only while focused (`controlActiveState`). Session titles come from
+the CLI's own `ai-title` records and are gated by `SettingsStore.useSessionTitles`
+(off ⇒ the parser never decodes them — strictly content-blind). Only Claude/Codex
+have a local project dimension; the API-quota providers don't implement the
+capability.
 
 ## Invariants
 

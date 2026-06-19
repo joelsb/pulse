@@ -19,6 +19,7 @@ struct PanelRootView: View {
     let onHeightChange: (CGFloat) -> Void
     let onClose: () -> Void
     let onOpenSettings: () -> Void
+    let onOpenBreakdown: () -> Void
 
     @State private var slideDirection: CGFloat = 0
     @State private var cardsHeight: CGFloat = 400
@@ -84,6 +85,7 @@ struct PanelRootView: View {
                     environment.openProvider(selection)
                     onClose()
                 },
+                openBreakdown: onOpenBreakdown,
                 openSettings: onOpenSettings,
                 minimize: onClose,
                 quit: { NSApp.terminate(nil) }
@@ -154,6 +156,7 @@ struct PanelRootView: View {
             Button("") { onClose() }.keyboardShortcut(.cancelAction)
             Button("") { environment.scheduler.refreshAll() }.keyboardShortcut("r", modifiers: .command)
             Button("") { onOpenSettings() }.keyboardShortcut(",", modifiers: .command)
+            Button("") { onOpenBreakdown() }.keyboardShortcut("b", modifiers: .command)
             Button("") { NSApp.terminate(nil) }.keyboardShortcut("q", modifiers: .command)
             Button("") { cycleTab(1) }.keyboardShortcut(.rightArrow, modifiers: [])
             Button("") { cycleTab(-1) }.keyboardShortcut(.leftArrow, modifiers: [])

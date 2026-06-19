@@ -6,6 +6,7 @@
 #   ./scripts/build-app.sh            build dist/Pulse.app
 #   ./scripts/build-app.sh --install  build + install to /Applications/Pulse.app
 #   ./scripts/build-app.sh --run      build + open dist/Pulse.app
+#   ./scripts/build-app.sh --package  build + create dist/Byte-Pulse.dmg (release asset)
 #
 # Environment overrides:
 #   SWIFT_BUILD_FLAGS   extra flags appended to `swift build` (e.g. "--arch arm64")
@@ -20,8 +21,8 @@ set -euo pipefail
 
 APP_NAME="Pulse"
 BUNDLE_ID="de.byte.pulse"
-VERSION="1.0.1"
-BUILD="2"
+VERSION="1.1.0"
+BUILD="3"
 MIN_OS="26.0"
 
 # ---------------------------------------------------------------- pretty output
@@ -60,14 +61,16 @@ ICON_SRC="${SCRIPT_DIR}/make-icon.swift"
 
 DO_INSTALL=0
 DO_RUN=0
+DO_PACKAGE=0
 for arg in "$@"; do
     case "$arg" in
         --install) DO_INSTALL=1 ;;
         --run)     DO_RUN=1 ;;
+        --package) DO_PACKAGE=1 ;;
         -h|--help)
-            sed -n '2,16p' "${SCRIPT_DIR}/build-app.sh" | sed 's/^# \{0,1\}//'
+            sed -n '2,17p' "${SCRIPT_DIR}/build-app.sh" | sed 's/^# \{0,1\}//'
             trap - EXIT; exit 0 ;;
-        *) die "unknown argument: ${arg} (use --install or --run)" ;;
+        *) die "unknown argument: ${arg} (use --install, --run, or --package)" ;;
     esac
 done
 
@@ -181,7 +184,27 @@ ok "signed + verified (ad-hoc)"
 
 ok "${APP_BUNDLE#"$REPO_ROOT"/} ready"
 
-# ---------------------------------------------------------------- 5. --install
+# ---------------------------------------------------------------- 5. --package (.dmg)
+
+if [ "$DO_PACKAGE" -eq 1 ]; then
+    # Asset name is kept stable across versions: the website's download CTA links
+    # to releases/latest/download/Byte-Pulse.dmg (see usage-tracker-website).
+    DMG_PATH="${DIST_DIR}/Byte-Pulse.dmg"
+    step "packaging ${DMG_PATH#"$REPO_ROOT"/}"
+    STAGE="$(mktemp -d)"
+    ditto "$APP_BUNDLE" "${STAGE}/${APP_NAME}.app"
+    ln -s /Applications "${STAGE}/Applications"   # drag-to-install affordance
+    rm -f "$DMG_PATH"
+    hdiutil create -volname "Byte Pulse" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" > /dev/null
+    rm -rf "$STAGE"
+    ok "${DMG_PATH#"$REPO_ROOT"/} created ($(du -h "$DMG_PATH" | awk '{print $1}'))"
+    printf '  SHA-256: %s\n' "$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+    # NOTE: the .app is ad-hoc signed (no Apple Developer ID / notarization), so
+    # Gatekeeper will warn on first launch — release notes document the
+    # right-click → Open workaround.
+fi
+
+# ---------------------------------------------------------------- 6. --install
 
 if [ "$DO_INSTALL" -eq 1 ]; then
     TARGET="/Applications/${APP_NAME}.app"
@@ -200,7 +223,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     printf '\n  Launch it with:  %sopen %s%s\n\n' "$BOLD" "$TARGET" "$RESET"
 fi
 
-# ---------------------------------------------------------------- 6. --run
+# ---------------------------------------------------------------- 7. --run
 
 if [ "$DO_RUN" -eq 1 ]; then
     step "launching ${APP_BUNDLE#"$REPO_ROOT"/}"

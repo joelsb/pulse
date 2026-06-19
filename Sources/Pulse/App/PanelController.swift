@@ -114,6 +114,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var anchor: (screen: NSScreen, x: CGFloat, top: CGFloat)?
     var onVisibilityChange: ((Bool) -> Void)?
     var openSettings: (() -> Void)?
+    var openBreakdown: (() -> Void)?
 
     private(set) var isPresented = false
 
@@ -134,6 +135,10 @@ final class PanelController: NSObject, NSWindowDelegate {
             onOpenSettings: { [weak self] in
                 self?.hide()
                 self?.openSettings?()
+            },
+            onOpenBreakdown: { [weak self] in
+                self?.hide()
+                self?.openBreakdown?()
             }
         )
         panel.contentView = PanelChromeView(rootView: rootView)

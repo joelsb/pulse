@@ -14,14 +14,17 @@ final class StatusItemController {
     private let statusItem: NSStatusItem
     private let panelController: PanelController
     private let settingsController: SettingsWindowController
+    private let breakdownController: BreakdownWindowController
 
     init(environment: AppEnvironment) {
         self.environment = environment
         self.settingsController = SettingsWindowController(environment: environment)
+        self.breakdownController = BreakdownWindowController(environment: environment)
         self.panelController = PanelController(environment: environment)
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         panelController.openSettings = { [weak self] in self?.showSettings() }
+        panelController.openBreakdown = { [weak self] in self?.showBreakdown() }
 
         configureButton()
     }
@@ -72,6 +75,12 @@ final class StatusItemController {
         panelController.show(relativeTo: button)
     }
 
+    /// `--show-breakdown` launch argument: opens the breakdown window without a
+    /// click, for smoke/screenshot verification.
+    func showBreakdownForDebug() {
+        showBreakdown()
+    }
+
     /// `--dump-status` writes status-item geometry + view state to /tmp for
     /// verification runs.
     func dumpStatusForDebug() {
@@ -105,6 +114,7 @@ final class StatusItemController {
     private func showContextMenu() {
         let menu = NSMenu()
         menu.addItem(withTitle: "Refresh Now", action: #selector(refreshNow), keyEquivalent: "r")
+        menu.addItem(withTitle: "Usage Breakdown…", action: #selector(openBreakdownItem), keyEquivalent: "b")
         menu.addItem(withTitle: "Settings…", action: #selector(openSettingsItem), keyEquivalent: ",")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Pulse", action: #selector(quit), keyEquivalent: "q")
@@ -125,11 +135,21 @@ final class StatusItemController {
         showSettings()
     }
 
+    @objc private func openBreakdownItem() {
+        showBreakdown()
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }
 
     private func showSettings() {
         settingsController.show()
+    }
+
+    /// Opens the breakdown window, landing on the provider the panel last showed
+    /// (when it's breakdown-capable; otherwise the window keeps its own default).
+    private func showBreakdown() {
+        breakdownController.show(initialProvider: environment.settings.selectedTab)
     }
 }

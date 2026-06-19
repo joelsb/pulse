@@ -326,7 +326,7 @@ struct ClaudeLogLineTests {
         ]
         try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
 
-        let entries = try ClaudeLogParser.parseFile(url)
+        let entries = try ClaudeLogParser.parseSession(url, captureTitles: true).entries
         #expect(entries.count == 4)
         #expect(entries.filter { $0.key == "msg_01FAKEAAA|req_011FAKEAAA" }.map(\.output) == [930])
         #expect(entries.filter { $0.key == nil }.count == 2)
@@ -336,7 +336,7 @@ struct ClaudeLogLineTests {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("pulse-claude-missing-\(UUID().uuidString).jsonl")
         #expect(throws: (any Error).self) {
-            try ClaudeLogParser.parseFile(missing)
+            try ClaudeLogParser.parseSession(missing, captureTitles: true)
         }
     }
 }
