@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-06-22 v1.2.1
+
+### Fixed
+- **The app crashed on launch on any machine other than the one that built it.**
+  The packaged `.app` resolved its SwiftPM resource bundle through the synthesized
+  `Bundle.module`, which — for an `.executableTarget` — only checks next to
+  `Bundle.main.bundleURL` (the `.app` root) and a *build-machine-absolute* path.
+  Neither is valid inside a shipped `.app`, where resources live in
+  `Contents/Resources`, so `Bundle.module` `fatalError`ed while drawing the
+  menu-bar icon. It only ever worked on the build machine (whose hardcoded path
+  existed), which is why it slipped through. Pulse now resolves the bundle from
+  `Contents/Resources` first and degrades to SF Symbols instead of crashing. This
+  is the launch failure reported in #1 (signing was only half the story).
+
 ## 2026-06-22 v1.2.0
 
 ### Signed & notarized
