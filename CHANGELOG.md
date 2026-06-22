@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-06-22 v1.2.0
+
+### Signed & notarized
+- Byte Pulse is now **code-signed with Apple Developer ID and notarized by
+  Apple**, then stapled — so the downloaded `Byte-Pulse.dmg` and the app inside
+  launch with **no Gatekeeper warning** (no more right-click → Open). Behavior is
+  unchanged; this is purely about trusted distribution.
+- `scripts/build-app.sh` gains a `--notarize` flow (Hardened Runtime + secure
+  timestamp, inner→outer signing, `notarytool submit` + staple for both the
+  `.app` and the `.dmg`); plain dev builds stay ad-hoc and instant. A new
+  `.github/workflows/release.yml` signs, notarizes, and publishes the DMG on
+  every `v*` tag.
+
 ## 2026-06-19 v1.1.0
 
 ### Usage Breakdown by project & session (new)

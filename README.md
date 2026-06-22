@@ -43,8 +43,8 @@ directory, drill into individual runs, and spot live instances at a glance.
 **Download** (easiest): grab `Byte-Pulse.dmg` from the
 [latest release](https://github.com/Byte-de/pulse/releases/latest), open it, and
 drag **Pulse** into Applications. Requires **macOS 26+** (Apple Silicon). The app
-is open-source and ad-hoc signed (no paid Developer ID), so macOS asks once on
-first launch — **right-click Pulse → Open** to confirm.
+is signed with Apple Developer ID and notarized by Apple, so it launches with no
+Gatekeeper warning — just double-click.
 
 **Or build from source** (needs **Xcode 26** / Swift 6.2):
 

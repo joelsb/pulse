@@ -3,26 +3,39 @@
 # build-app.sh — builds the distributable Byte Pulse app bundle (dist/Pulse.app).
 #
 # Usage:
-#   ./scripts/build-app.sh            build dist/Pulse.app
+#   ./scripts/build-app.sh            build dist/Pulse.app (ad-hoc signed)
 #   ./scripts/build-app.sh --install  build + install to /Applications/Pulse.app
 #   ./scripts/build-app.sh --run      build + open dist/Pulse.app
 #   ./scripts/build-app.sh --package  build + create dist/Byte-Pulse.dmg (release asset)
+#   ./scripts/build-app.sh --notarize build + notarize + staple the .app and .dmg
+#                                      (implies --package; needs a Developer ID)
 #
 # Environment overrides:
+#   SIGN_IDENTITY   codesign identity. Default "-" (ad-hoc, for local dev). For a
+#                   release set a Developer ID, e.g.
+#                     SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID1234)"
+#                   With a real identity the code is signed with Hardened Runtime
+#                   (--options runtime) and a secure timestamp — required to notarize.
+#                   Find yours with: security find-identity -v -p codesigning
+#   NOTARY_PROFILE  notarytool keychain profile used by --notarize (default BYTE_NOTARY).
+#                   Create it once with an App Store Connect API key:
+#                     xcrun notarytool store-credentials BYTE_NOTARY \
+#                       --key AuthKey_KEYID.p8 --key-id KEYID --issuer ISSUER-UUID
 #   SWIFT_BUILD_FLAGS   extra flags appended to `swift build` (e.g. "--arch arm64")
 #   BINARY_OVERRIDE     path to a prebuilt executable; skips `swift build`
 #                       entirely (for CI / packaging tests only)
 #
 # Pipeline: swift build → assemble bundle → Info.plist + PkgInfo → icon
-# (cached render via scripts/make-icon.swift) → ad-hoc codesign LAST
-# (adding files after signing breaks the seal — docs/RESEARCH/swiftui-macos26.md §6).
+# (cached render via scripts/make-icon.swift) → codesign LAST, inner→outer
+# (adding files after signing breaks the seal — docs/RESEARCH/swiftui-macos26.md §6)
+# → [--notarize] notarytool submit + staple the .app, then the .dmg.
 
 set -euo pipefail
 
 APP_NAME="Pulse"
 BUNDLE_ID="de.byte.pulse"
-VERSION="1.1.0"
-BUILD="3"
+VERSION="1.2.0"
+BUILD="4"
 MIN_OS="26.0"
 
 # ---------------------------------------------------------------- pretty output
@@ -45,6 +58,40 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# ---------------------------------------------------------------- signing config
+
+# "-" means ad-hoc (default). A Developer ID switches on Hardened Runtime + a
+# secure timestamp so the result is notarization-eligible. SWIFT_BUILD_FLAGS-style
+# word-splitting on CODESIGN_OPTS is intentional (flags carry no spaces).
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-BYTE_NOTARY}"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+    SIGN_LABEL="ad-hoc"
+    CODESIGN_OPTS=""
+else
+    SIGN_LABEL="$SIGN_IDENTITY"
+    CODESIGN_OPTS="--options runtime --timestamp"
+fi
+
+# Sign one path with the configured identity/options.
+sign_path() {
+    # shellcheck disable=SC2086
+    codesign --force $CODESIGN_OPTS --sign "$SIGN_IDENTITY" "$1"
+}
+
+# Submit a container (.zip/.dmg) to the notary service, wait, then staple the
+# ticket onto a target (the .app or the .dmg — you cannot staple a .zip).
+notarize_container() {  # notarize_container <submit-target> <staple-target>
+    step "notarytool submit ${1#"$REPO_ROOT"/}  (profile: ${NOTARY_PROFILE})"
+    if ! xcrun notarytool submit "$1" --keychain-profile "$NOTARY_PROFILE" --wait; then
+        die "notarization failed — inspect with: xcrun notarytool log <submission-id> --keychain-profile ${NOTARY_PROFILE}"
+    fi
+    step "stapler staple ${2#"$REPO_ROOT"/}"
+    xcrun stapler staple "$2"
+    xcrun stapler validate "$2" || die "stapler validate failed for ${2#"$REPO_ROOT"/}"
+    ok "notarized + stapled: ${2#"$REPO_ROOT"/}"
+}
+
 # ---------------------------------------------------------------- locations
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,19 +109,26 @@ ICON_SRC="${SCRIPT_DIR}/make-icon.swift"
 DO_INSTALL=0
 DO_RUN=0
 DO_PACKAGE=0
+NOTARIZE=0
 for arg in "$@"; do
     case "$arg" in
-        --install) DO_INSTALL=1 ;;
-        --run)     DO_RUN=1 ;;
-        --package) DO_PACKAGE=1 ;;
+        --install)  DO_INSTALL=1 ;;
+        --run)      DO_RUN=1 ;;
+        --package)  DO_PACKAGE=1 ;;
+        --notarize) NOTARIZE=1; DO_PACKAGE=1 ;;
         -h|--help)
-            sed -n '2,17p' "${SCRIPT_DIR}/build-app.sh" | sed 's/^# \{0,1\}//'
+            sed -n '2,/^$/p' "${SCRIPT_DIR}/build-app.sh" | sed 's/^# \{0,1\}//'
             trap - EXIT; exit 0 ;;
-        *) die "unknown argument: ${arg} (use --install, --run, or --package)" ;;
+        *) die "unknown argument: ${arg} (use --install, --run, --package, or --notarize)" ;;
     esac
 done
 
+if [ "$NOTARIZE" -eq 1 ] && [ "$SIGN_IDENTITY" = "-" ]; then
+    die "--notarize needs a Developer ID — set SIGN_IDENTITY=\"Developer ID Application: … (TEAMID)\" (see --help)"
+fi
+
 printf '%sByte Pulse — packaging %s %s (build %s)%s\n' "$BOLD" "$APP_NAME" "$VERSION" "$BUILD" "$RESET"
+printf '%s  signing identity: %s%s\n' "$DIM" "$SIGN_LABEL" "$RESET"
 
 # ---------------------------------------------------------------- 1. binary
 
@@ -176,11 +230,25 @@ ok "bundle assembled (Info.plist lint OK, icon + PkgInfo in place)"
 
 # ---------------------------------------------------------------- 4. codesign (LAST)
 
-step "codesign --force --sign - (ad-hoc)"
-codesign --force --sign - "$APP_BUNDLE" 2> /dev/null \
-    || codesign --force --sign - "$APP_BUNDLE"   # re-run loudly if it failed
-codesign --verify --strict "$APP_BUNDLE" || die "codesign verification failed"
-ok "signed + verified (ad-hoc)"
+# Sign the .app bundle — that seals both the main executable and every resource
+# under Contents/, including the flat SPM resource bundle (SVG-only, no Mach-O,
+# so it must NOT be signed on its own — codesign rejects that bundle format and
+# it needs no signature). There is no nested *code* to sign first, so a single
+# bundle sign is complete; Apple deprecates --deep, which we avoid.
+step "codesign — ${SIGN_LABEL}"
+sign_path "$APP_BUNDLE"
+codesign --verify --strict --verbose=2 "$APP_BUNDLE" || die "codesign verification failed"
+ok "signed + verified (${SIGN_LABEL})"
+
+# Notarize + staple the .app. notarytool needs a container, so zip the bundle to
+# submit, then staple the ticket onto the .app itself (a .zip can't be stapled).
+if [ "$NOTARIZE" -eq 1 ]; then
+    NOTARIZE_ZIP="${DIST_DIR}/${APP_NAME}-notarize.zip"
+    rm -f "$NOTARIZE_ZIP"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARIZE_ZIP"
+    notarize_container "$NOTARIZE_ZIP" "$APP_BUNDLE"
+    rm -f "$NOTARIZE_ZIP"
+fi
 
 ok "${APP_BUNDLE#"$REPO_ROOT"/} ready"
 
@@ -198,10 +266,25 @@ if [ "$DO_PACKAGE" -eq 1 ]; then
     hdiutil create -volname "Byte Pulse" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" > /dev/null
     rm -rf "$STAGE"
     ok "${DMG_PATH#"$REPO_ROOT"/} created ($(du -h "$DMG_PATH" | awk '{print $1}'))"
+
+    # The .dmg is signed and notarized separately from the .app it carries
+    # (a disk image gets no Hardened Runtime — that's a property of executables).
+    if [ "$SIGN_IDENTITY" != "-" ]; then
+        step "codesign dmg — ${SIGN_LABEL}"
+        codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+        ok "dmg signed"
+    fi
+    if [ "$NOTARIZE" -eq 1 ]; then
+        notarize_container "$DMG_PATH" "$DMG_PATH"
+    fi
+
+    # SHA computed LAST: signing + stapling rewrite the disk image's bytes.
     printf '  SHA-256: %s\n' "$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
-    # NOTE: the .app is ad-hoc signed (no Apple Developer ID / notarization), so
-    # Gatekeeper will warn on first launch — release notes document the
-    # right-click → Open workaround.
+
+    if [ "$SIGN_IDENTITY" = "-" ]; then
+        printf '  %sNote:%s ad-hoc signed (no Developer ID) — Gatekeeper warns on first launch;\n' "$DIM" "$RESET"
+        printf '        users must right-click → Open. For a clean release set SIGN_IDENTITY and pass --notarize.\n'
+    fi
 fi
 
 # ---------------------------------------------------------------- 6. --install
