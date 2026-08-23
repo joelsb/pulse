@@ -212,6 +212,162 @@ struct ClaudeUsageEndpointTests {
     }
 }
 
+// MARK: - Structured `limits` array (Fable weekly cap)
+
+@Suite("Claude structured limits")
+struct ClaudeStructuredLimitTests {
+    /// Shape of the endpoint as of Claude Code 2.1.241 (2026-08): the flat
+    /// windows plus the `limits` array, which is the only place the Fable
+    /// weekly cap is reported. Numbers fabricated; ids/flags realistic.
+    private let structuredJSON = Data(#"""
+    {"five_hour":{"utilization":24.0,"resets_at":"2026-08-23T14:50:00.290627+00:00","limit_dollars":null,"used_dollars":null,"remaining_dollars":null},
+     "seven_day":{"utilization":13.0,"resets_at":"2026-08-24T14:00:00.290652+00:00","limit_dollars":null},
+     "seven_day_oauth_apps":null,
+     "seven_day_opus":null,
+     "seven_day_sonnet":null,
+     "nimbus_quill":{"utilization":0.0,"resets_at":null},
+     "extra_usage":{"is_enabled":false,"monthly_limit":15000,"used_credits":5106.0,"utilization":34.04,"currency":"EUR","decimal_places":2,"disabled_reason":"out_of_credits"},
+     "limits":[
+       {"kind":"session","group":"session","percent":24,"severity":"normal","resets_at":"2026-08-23T14:50:00.290627+00:00","scope":null,"is_active":true},
+       {"kind":"weekly_all","group":"weekly","percent":13,"severity":"normal","resets_at":"2026-08-24T14:00:00.290652+00:00","scope":null,"is_active":false},
+       {"kind":"weekly_scoped","group":"weekly","percent":24,"severity":"normal","resets_at":"2026-08-24T14:00:00.290945+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}
+     ],
+     "spend":{"used":{"amount_minor":5106,"currency":"EUR","exponent":2},"percent":34,"severity":"normal","enabled":false},
+     "member_dashboard_available":false}
+    """#.utf8)
+
+    @Test func parsesLimitsArrayAlongsideFlatWindows() throws {
+        let response = try ClaudeUsageResponse.parse(structuredJSON)
+
+        // Flat windows still decode; the new non-window keys never leak in.
+        #expect(response.windows["five_hour"]?.utilization == 24.0)
+        #expect(response.windows["nimbus_quill"]?.utilization == 0.0)
+        #expect(response.windows["limits"] == nil)
+        #expect(response.windows["spend"] == nil)
+        #expect(response.windows["extra_usage"] == nil)
+
+        #expect(response.limits.map(\.kind) == ["session", "weekly_all", "weekly_scoped"])
+        let fable = try #require(response.limits.last)
+        #expect(fable.percent == 24) // integer `percent` → Double
+        #expect(fable.modelName == "Fable")
+        #expect(fable.resetsAt != nil)
+        #expect(response.limits[0].modelName == nil) // unscoped
+    }
+
+    @Test func promotesFableToItsOwnGauge() throws {
+        let mapped = ClaudeUsageAPI.limitWindows(from: try ClaudeUsageResponse.parse(structuredJSON))
+
+        // Session + weekly keep coming from the flat keys.
+        #expect(mapped.primary?.id == "five_hour")
+        #expect(mapped.primary?.utilization == 24.0)
+        #expect(mapped.secondary?.id == "seven_day")
+        #expect(mapped.secondary?.utilization == 13.0)
+
+        let fable = try #require(mapped.tertiary)
+        #expect(fable.id == "weekly_scoped.fable")
+        #expect(fable.title == "Fable Weekly")
+        #expect(fable.systemImage == "sparkle")
+        #expect(fable.utilization == 24)
+        #expect(fable.windowDuration == TimeInterval(7 * 86400))
+        let reset = try #require(fable.resetsAt)
+        #expect(abs(reset.timeIntervalSince(ClaudeISO8601().date(from: "2026-08-24T14:00:00Z")!)) < 1)
+
+        // Opus/Sonnet are null → no compact rows.
+        #expect(mapped.extras.isEmpty)
+    }
+
+    @Test func featuredFamilyMatchesCaseInsensitivelyAndIncludesMythos() throws {
+        func tertiary(named name: String) throws -> LimitWindow? {
+            let json = #"{"five_hour":{"utilization":1.0},"limits":[{"kind":"weekly_scoped","percent":7,"resets_at":"2026-08-24T14:00:00Z","scope":{"model":{"id":null,"display_name":"\#(name)"}}}]}"#
+            return ClaudeUsageAPI.limitWindows(from: try ClaudeUsageResponse.parse(Data(json.utf8))).tertiary
+        }
+        #expect(try tertiary(named: "FABLE")?.title == "FABLE Weekly") // API casing kept
+        #expect(try tertiary(named: "FABLE")?.id == "weekly_scoped.fable")
+        #expect(try tertiary(named: "Mythos")?.title == "Mythos Weekly")
+        #expect(try tertiary(named: "Opus") == nil) // not a featured family
+    }
+
+    @Test func dormantFableBucketStaysHidden() throws {
+        // Never used and not scheduled: no card, so accounts that don't touch
+        // Fable keep a quiet panel.
+        let dormant = #"{"five_hour":{"utilization":1.0},"limits":[{"kind":"weekly_scoped","percent":0,"resets_at":null,"scope":{"model":{"id":null,"display_name":"Fable"}}}]}"#
+        #expect(ClaudeUsageAPI.limitWindows(from: try ClaudeUsageResponse.parse(Data(dormant.utf8))).tertiary == nil)
+
+        // Rolled off to 0% mid-window: the countdown is still useful → shown.
+        let scheduled = #"{"five_hour":{"utilization":1.0},"limits":[{"kind":"weekly_scoped","percent":0,"resets_at":"2026-08-24T14:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"}}}]}"#
+        let shown = ClaudeUsageAPI.limitWindows(from: try ClaudeUsageResponse.parse(Data(scheduled.utf8))).tertiary
+        #expect(shown?.utilization == 0)
+        #expect(shown?.resetsAt != nil)
+    }
+
+    @Test func otherScopedModelsJoinExtrasAndSupersedeLegacyKeys() throws {
+        // Opus arrives both as a legacy flat key (stale 99%) and as a scoped
+        // limit (12%); the structured entry wins and the flat one is dropped.
+        // Sonnet only exists as a flat key → legacy path still works.
+        let json = #"""
+        {"five_hour":{"utilization":1.0},
+         "seven_day":{"utilization":2.0},
+         "seven_day_opus":{"utilization":99.0,"resets_at":null},
+         "seven_day_sonnet":{"utilization":5.0,"resets_at":null},
+         "limits":[
+           {"kind":"weekly_scoped","percent":24,"resets_at":"2026-08-24T14:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"}}},
+           {"kind":"weekly_scoped","percent":12,"resets_at":"2026-08-24T14:00:00Z","scope":{"model":{"id":"claude-opus-5","display_name":"Opus"}}},
+           {"kind":"weekly_scoped","percent":0,"resets_at":null,"scope":{"model":{"id":null,"display_name":"Haiku"}}}
+         ]}
+        """#
+        let mapped = ClaudeUsageAPI.limitWindows(from: try ClaudeUsageResponse.parse(Data(json.utf8)))
+
+        #expect(mapped.tertiary?.id == "weekly_scoped.fable")
+        #expect(mapped.extras.map(\.id) == ["weekly_scoped.opus", "seven_day_sonnet"])
+        #expect(mapped.extras.map(\.title) == ["Opus Weekly", "Sonnet Weekly"])
+        #expect(mapped.extras.first?.utilization == 12)
+        #expect(mapped.extras.first?.resetsAt != nil) // the structured entry carries the reset
+        // Haiku at 0% carries no signal → no row.
+        #expect(!mapped.extras.contains { $0.id == "weekly_scoped.haiku" })
+    }
+
+    @Test func structuredArrayBacksUpMissingFlatWindows() throws {
+        // Should the flat keys ever go away, session + weekly still render.
+        let json = #"{"limits":[{"kind":"session","percent":31,"resets_at":"2026-08-23T14:50:00Z"},{"kind":"weekly_all","percent":9,"resets_at":"2026-08-24T14:00:00Z"}]}"#
+        let response = try ClaudeUsageResponse.parse(Data(json.utf8))
+        #expect(response.windows.isEmpty)
+        let mapped = ClaudeUsageAPI.limitWindows(from: response)
+        #expect(mapped.primary?.utilization == 31)
+        #expect(mapped.primary?.windowDuration == TimeInterval(5 * 3600))
+        #expect(mapped.secondary?.utilization == 9)
+        #expect(mapped.secondary?.windowDuration == TimeInterval(7 * 86400))
+        #expect(mapped.tertiary == nil)
+    }
+
+    @Test func malformedLimitEntriesAreSkippedNotFatal() throws {
+        let json = #"""
+        {"five_hour":{"utilization":1.0},
+         "limits":[
+           {"kind":"weekly_scoped","percent":24,"scope":{"model":{"display_name":"   "}}},
+           {"kind":"weekly_scoped","percent":"24","scope":{"model":{"display_name":"Fable"}}},
+           {"percent":24,"scope":{"model":{"display_name":"Fable"}}},
+           "not-an-object",
+           {"kind":"weekly_scoped","percent":3,"scope":{"surface":{"display_name":"Cowork"}}},
+           {"kind":"weekly_scoped","percent":24,"resets_at":"2026-08-24T14:00:00Z","scope":{"model":{"display_name":"Fable"}}}
+         ]}
+        """#
+        let response = try ClaudeUsageResponse.parse(Data(json.utf8))
+        // Blank model name → unscoped; string percent / missing kind → dropped;
+        // surface-only scope → kept but unscoped (no model to attribute).
+        #expect(response.limits.count == 3)
+        #expect(response.limits[0].modelName == nil)
+        #expect(response.limits[1].modelName == nil)
+        #expect(response.limits[2].modelName == "Fable")
+        #expect(ClaudeUsageAPI.limitWindows(from: response).tertiary?.utilization == 24)
+    }
+
+    @Test func emptyLimitsArrayAloneIsStillAParseError() {
+        #expect(throws: ProviderFetchError.self) {
+            _ = try ClaudeUsageResponse.parse(Data(#"{"five_hour":null,"limits":[]}"#.utf8))
+        }
+    }
+}
+
 // MARK: - Log lines
 
 @Suite("Claude log lines")

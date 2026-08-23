@@ -49,6 +49,7 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
             let mapped = ClaudeUsageAPI.limitWindows(from: response)
             snapshot.primary = mapped.primary
             snapshot.secondary = mapped.secondary
+            snapshot.tertiary = mapped.tertiary
             snapshot.extraWindows = mapped.extras
         case .failure(let error):
             limitsError = error

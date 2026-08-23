@@ -43,6 +43,10 @@ struct UsageSnapshot: Sendable, Equatable {
     var primary: LimitWindow?
     /// The weekly-style gauge.
     var secondary: LimitWindow?
+    /// A featured model-scoped gauge rendered as a full card beneath the
+    /// weekly one (Claude's Fable weekly cap). Gets the same trend/pace
+    /// treatment as `primary`/`secondary`.
+    var tertiary: LimitWindow?
     /// Additional gauges rendered as compact rows (per-model weekly caps,
     /// on-demand spend, Gemini per-model quotas, ...).
     var extraWindows: [LimitWindow] = []

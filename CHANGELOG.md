@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-08-23 v1.3.0
+
+### Fable weekly limit (new)
+- **Claude gets a third gauge card: "Fable Weekly"** — the model-scoped weekly
+  cap for Claude Fable, shown directly beneath "Weekly Limit" with the same
+  treatment as the session and weekly gauges: live %, 1-hour trend arrow,
+  threshold-colored bar, reset countdown, and pace verdict. It mirrors the
+  "Current week (Fable)" row in Claude Code's `/usage`.
+- Why it was missing: the usage endpoint never reports Fable as a flat window
+  key. It only exists in the newer structured `limits` array
+  (`kind: "weekly_scoped"`, `scope.model.display_name: "Fable"`), which Pulse
+  now parses alongside the legacy keys. Other model-scoped caps reported there
+  (Opus, Sonnet, …) join the compact "Model Limits" rows and supersede their
+  legacy flat keys; session and weekly gauges fall back to the array should
+  the flat keys ever disappear.
+- The card appears once the Fable bucket is live (used this week or scheduled
+  to reset), so accounts that never touch Fable keep a quiet panel. The
+  featured family is matched by the API's display name, so a Mythos cap gets
+  the same card.
+- Trend history gains a third series (`tertiary`); existing history files keep
+  decoding unchanged — the arrow shows up after the first hour of samples.
+
+### Also
+- README panel screenshots refreshed; test suite grows to **197 unit tests**
+  (structured-limits parsing, Fable promotion/dedupe rules, history
+  compatibility, store carry-forward).
+
 ## 2026-06-22 v1.2.1
 
 ### Fixed

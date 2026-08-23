@@ -19,6 +19,7 @@ struct ProviderRecord: Sendable {
     /// Trend arrows (vs ~1h ago), computed by the scheduler from history.
     var primaryTrend: Trend?
     var secondaryTrend: Trend?
+    var tertiaryTrend: Trend?
     /// Usage-rate series for the chart, recomputed after each sample.
     var rateSeries: [RatePoint] = []
 
@@ -84,6 +85,7 @@ final class UsageStore {
         if incoming.limitsUnavailable, let previous = record.snapshot {
             if incoming.primary == nil { incoming.primary = previous.primary }
             if incoming.secondary == nil { incoming.secondary = previous.secondary }
+            if incoming.tertiary == nil { incoming.tertiary = previous.tertiary }
             if incoming.extraWindows.isEmpty { incoming.extraWindows = previous.extraWindows }
         }
 
@@ -123,10 +125,17 @@ final class UsageStore {
         records[id] = record
     }
 
-    func applyDerived(_ id: ProviderID, primaryTrend: Trend?, secondaryTrend: Trend?, rateSeries: [RatePoint]) {
+    func applyDerived(
+        _ id: ProviderID,
+        primaryTrend: Trend?,
+        secondaryTrend: Trend?,
+        tertiaryTrend: Trend? = nil,
+        rateSeries: [RatePoint]
+    ) {
         var record = record(for: id)
         record.primaryTrend = primaryTrend
         record.secondaryTrend = secondaryTrend
+        record.tertiaryTrend = tertiaryTrend
         record.rateSeries = rateSeries
         records[id] = record
     }

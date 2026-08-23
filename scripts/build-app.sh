@@ -34,8 +34,8 @@ set -euo pipefail
 
 APP_NAME="Pulse"
 BUNDLE_ID="de.byte.pulse"
-VERSION="1.2.1"
-BUILD="5"
+VERSION="1.3.0"
+BUILD="6"
 MIN_OS="26.0"
 
 # ---------------------------------------------------------------- pretty output

@@ -27,8 +27,10 @@ RefreshScheduler (per-provider loop, jitter, backoff, wake/panel triggers)
 ```
 
 `UsageSnapshot` is capability-shaped: the UI renders what's present (`primary`/
-`secondary` gauges, `extraWindows`, `tokens`, `dailyUsage`) and hides what's
-nil, so providers with different data (Gemini: quotas, no costs) share one shape.
+`secondary`/`tertiary` gauges, `extraWindows`, `tokens`, `dailyUsage`) and hides
+what's nil, so providers with different data (Gemini: quotas, no costs) share one
+shape. `tertiary` is a featured model-scoped gauge (Claude's Fable weekly cap)
+that gets full-card treatment — trend, pace, countdown — like the first two.
 `ProviderRecord` keeps the last good snapshot alongside the last error so
 failures degrade to a stale badge instead of blanking the panel.
 
@@ -36,7 +38,7 @@ failures degrade to a stale badge instead of blanking the panel.
 
 | Provider | Limits source | Tokens/cost source | Auth |
 |---|---|---|---|
-| Claude | `api.anthropic.com/api/oauth/usage` | `~/.claude/projects/**/*.jsonl` + pricing table | Keychain "Claude Code-credentials" via `/usr/bin/security` (stable ACL grant), file fallback |
+| Claude | `api.anthropic.com/api/oauth/usage` (flat windows + structured `limits` array; Fable only in the latter) | `~/.claude/projects/**/*.jsonl` + pricing table | Keychain "Claude Code-credentials" via `/usr/bin/security` (stable ACL grant), file fallback |
 | Codex | `chatgpt.com/backend-api/wham/usage` (fallback: newest session JSONL `rate_limits`) | `~/.codex/sessions/**` cumulative `token_count` deltas | `~/.codex/auth.json` |
 | Cursor | `cursor.com` usage + dashboard APIs | `get-aggregated-usage-events` / `get-filtered-usage-events` | JWT from `state.vscdb` (read-only, immutable mode) → `WorkosCursorSessionToken` cookie |
 | Gemini | `cloudcode-pa.googleapis.com` `loadCodeAssist` + `retrieveUserQuota` | n/a (quota-only tab) | `~/.gemini/oauth_creds.json`, in-memory refresh only |

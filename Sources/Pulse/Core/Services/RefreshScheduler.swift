@@ -115,12 +115,20 @@ final class RefreshScheduler {
         await history.record(
             id,
             primary: snapshot.primary?.utilization,
-            secondary: snapshot.secondary?.utilization
+            secondary: snapshot.secondary?.utilization,
+            tertiary: snapshot.tertiary?.utilization
         )
         let primaryTrend = await history.delta(id, of: \.primary, over: 3600).map { Trend(delta: $0) }
         let secondaryTrend = await history.delta(id, of: \.secondary, over: 3600).map { Trend(delta: $0) }
+        let tertiaryTrend = await history.delta(id, of: \.tertiary, over: 3600).map { Trend(delta: $0) }
         let samples = await history.series(id, since: .now.addingTimeInterval(-5.5 * 3600))
         let rate = UsageMath.rateSeries(samples: samples)
-        store.applyDerived(id, primaryTrend: primaryTrend, secondaryTrend: secondaryTrend, rateSeries: rate)
+        store.applyDerived(
+            id,
+            primaryTrend: primaryTrend,
+            secondaryTrend: secondaryTrend,
+            tertiaryTrend: tertiaryTrend,
+            rateSeries: rate
+        )
     }
 }

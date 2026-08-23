@@ -259,7 +259,9 @@ struct UsageStoreResilienceTests {
 
     @Test func limitsUnavailableCarriesPreviousGaugesForward() {
         let store = UsageStore()
-        store.apply(snapshotWithGauge(.claude))
+        var healthy = snapshotWithGauge(.claude)
+        healthy.tertiary = LimitWindow(id: "weekly_scoped.fable", title: "Fable Weekly", systemImage: "sparkle", utilization: 24)
+        store.apply(healthy)
 
         var degraded = UsageSnapshot(providerID: .claude)
         degraded.limitsUnavailable = true
@@ -271,7 +273,79 @@ struct UsageStoreResilienceTests {
 
         let record = store.record(for: .claude)
         #expect(record.snapshot?.primary?.utilization == 42) // gauge survived the blip
+        #expect(record.snapshot?.tertiary?.utilization == 24) // so did the Fable card
         #expect(record.snapshot?.tokens != nil)
+    }
+
+    @Test func derivedTrendsCoverAllThreeGauges() {
+        let store = UsageStore()
+        store.apply(snapshotWithGauge(.claude))
+        store.applyDerived(
+            .claude,
+            primaryTrend: Trend(delta: 1),
+            secondaryTrend: Trend(delta: -2),
+            tertiaryTrend: Trend(delta: 3),
+            rateSeries: []
+        )
+        let record = store.record(for: .claude)
+        #expect(record.primaryTrend?.delta == 1)
+        #expect(record.secondaryTrend?.delta == -2)
+        #expect(record.tertiaryTrend?.delta == 3)
+    }
+}
+
+@Suite("HistoryStore")
+struct HistoryStoreTests {
+    private func temporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pulse-history-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    @Test func tracksTheTertiaryGaugeForTrends() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = HistoryStore(directory: directory)
+        let now = Date.now.addingTimeInterval(-600)
+
+        await history.record(.claude, primary: 10, secondary: 5, tertiary: 20, at: now.addingTimeInterval(-3600))
+        await history.record(.claude, primary: 12, secondary: 5, tertiary: 24, at: now)
+
+        #expect(await history.delta(.claude, of: \.tertiary, over: 3600, now: now) == 4)
+        #expect(await history.delta(.claude, of: \.primary, over: 3600, now: now) == 2)
+        #expect(await history.delta(.claude, of: \.secondary, over: 3600, now: now) == 0)
+
+        // A sample carrying only the tertiary gauge is still worth keeping.
+        await history.record(.claude, primary: nil, secondary: nil, tertiary: 30, at: now.addingTimeInterval(60))
+        let series = await history.series(.claude, since: now.addingTimeInterval(30))
+        #expect(series.map(\.tertiary) == [30])
+    }
+
+    @Test func samplesWrittenBeforeTertiaryExistedStillDecode() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Recent dates: loading applies the 14-day retention cutoff.
+        let now = Date.now.addingTimeInterval(-600)
+
+        // A v1.2 history line: no `tertiary` key at all.
+        let encoder = JSONEncoder()
+        let legacy = try encoder.encode(UsageSample(date: now.addingTimeInterval(-3600), primary: 40, secondary: 8))
+        var blob = legacy
+        blob.append(0x0A)
+        #expect(!String(decoding: legacy, as: UTF8.self).contains("tertiary")) // nil is omitted on disk
+        try blob.write(to: directory.appendingPathComponent("history-claude.jsonl"))
+
+        let history = HistoryStore(directory: directory)
+        await history.record(.claude, primary: 44, secondary: 9, tertiary: 24, at: now)
+
+        let series = await history.series(.claude, since: .distantPast)
+        #expect(series.count == 2)
+        #expect(series.first?.tertiary == nil)
+        #expect(series.last?.tertiary == 24)
+        // The trend needs a reference value: absent on the old sample → no arrow yet.
+        #expect(await history.delta(.claude, of: \.tertiary, over: 3600, now: now) == nil)
+        #expect(await history.delta(.claude, of: \.primary, over: 3600, now: now) == 4)
     }
 }
 
