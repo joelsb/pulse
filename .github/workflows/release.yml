@@ -122,5 +122,15 @@ jobs:
         if: env.VERCEL_DEPLOY_HOOK_URL != ''
         run: |
           set -euo pipefail
-          curl -fsS -X POST "$VERCEL_DEPLOY_HOOK_URL" -o /dev/null
+          # Tolerate a pasted trailing newline; insist on a Vercel hook URL so a
+          # wrong clipboard surfaces here instead of as a silent non-deploy.
+          HOOK="$(printf '%s' "$VERCEL_DEPLOY_HOOK_URL" | tr -d '[:space:]')"
+          case "$HOOK" in
+            https://api.vercel.com/v1/integrations/deploy/*) ;;
+            *)
+              echo "::error::VERCEL_DEPLOY_HOOK_URL is not a Vercel deploy-hook URL (expected https://api.vercel.com/v1/integrations/deploy/…) — the website was not redeployed."
+              exit 1
+              ;;
+          esac
+          curl -fsS -X POST "$HOOK" -o /dev/null
           echo "Website redeploy triggered"
