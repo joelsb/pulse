@@ -15,7 +15,9 @@ Electron, no accounts, no telemetry.
 - **Menu bar stats** — compact per-provider blocks (session %, 1-hour trend);
   only providers active in the last 7 days take up space
 - **Limit gauges** — 5-hour / weekly / monthly windows with reset countdowns
-  and a pace verdict (safe · elevated · critical)
+  and a pace verdict (safe · elevated · critical); Claude also gets a dedicated
+  **Fable Weekly** gauge for the model-scoped cap, plus compact rows for other
+  per-model limits
 - **Usage rate** — how fast you're burning the current window (last 5h)
 - **Histogram** — click the badge to switch 1 day (hourly) / 7d / 30d / 1 year
 - **Token table** — Today & This Month × Input / Output / Cache / Cost, with a

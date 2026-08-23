@@ -24,7 +24,7 @@ Keep changes small, focused, and faithful to those constraints.
 swift test
 ```
 
-The suite is currently **186 tests** and **must stay green**. Add tests for new logic;
+The suite is currently **197 tests** and **must stay green**. Add tests for new logic;
 PRs that change behavior without covering it will be asked for tests.
 
 ## Where to start

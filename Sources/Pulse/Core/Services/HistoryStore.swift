@@ -6,6 +6,9 @@ struct UsageSample: Sendable, Equatable, Codable {
     var date: Date
     var primary: Double?
     var secondary: Double?
+    /// Featured model-scoped gauge (Claude's Fable weekly). Optional so
+    /// history files written before it existed keep decoding.
+    var tertiary: Double? = nil
 }
 
 /// Append-only utilization history, one JSONL file per provider under
@@ -25,12 +28,18 @@ actor HistoryStore {
 
     /// Records a sample. Consecutive samples closer than 30s apart are dropped
     /// so a manual refresh storm doesn't distort the rate series.
-    func record(_ id: ProviderID, primary: Double?, secondary: Double?, at date: Date = .now) {
-        guard primary != nil || secondary != nil else { return }
+    func record(
+        _ id: ProviderID,
+        primary: Double?,
+        secondary: Double?,
+        tertiary: Double? = nil,
+        at date: Date = .now
+    ) {
+        guard primary != nil || secondary != nil || tertiary != nil else { return }
         loadIfNeeded(id)
         if let last = samples[id]?.last, date.timeIntervalSince(last.date) < 30 { return }
 
-        let sample = UsageSample(date: date, primary: primary, secondary: secondary)
+        let sample = UsageSample(date: date, primary: primary, secondary: secondary, tertiary: tertiary)
         samples[id, default: []].append(sample)
         append(sample, to: fileURL(id))
         pruneIfDue(now: date)

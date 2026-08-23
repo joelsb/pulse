@@ -32,6 +32,9 @@ struct ProviderDetailView: View {
             if let secondary = snapshot.secondary {
                 LimitGaugeCard(window: secondary, trend: record.secondaryTrend, isStale: record.isStale)
             }
+            if let tertiary = snapshot.tertiary {
+                LimitGaugeCard(window: tertiary, trend: record.tertiaryTrend, isStale: record.isStale)
+            }
             if !snapshot.extraWindows.isEmpty {
                 ExtraLimitsCard(
                     title: descriptor.id == .gemini ? "Model Quotas" : "Model Limits",
