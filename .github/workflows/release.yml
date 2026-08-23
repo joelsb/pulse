@@ -36,6 +36,12 @@ jobs:
     runs-on: macos-26
     env:
       NOTARY_PROFILE: BYTE_NOTARY
+      # Optional: a Vercel deploy hook for pulse.byte.de. The website bakes this
+      # repo's CHANGELOG.md into its /changelog/ page at build time, so a
+      # redeploy after each release publishes the new notes right away.
+      # Create it in Vercel → Project → Settings → Git → Deploy Hooks and store
+      # the URL as the VERCEL_DEPLOY_HOOK_URL secret; the step is skipped until then.
+      VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -111,3 +117,10 @@ jobs:
               --title "Byte Pulse ${TAG#v}" \
               --notes "Signed & notarized build. See CHANGELOG.md for details."
           fi
+
+      - name: Redeploy pulse.byte.de so its changelog page picks up this release
+        if: env.VERCEL_DEPLOY_HOOK_URL != ''
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST "$VERCEL_DEPLOY_HOOK_URL" -o /dev/null
+          echo "Website redeploy triggered"
