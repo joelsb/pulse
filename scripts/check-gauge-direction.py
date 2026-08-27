@@ -62,6 +62,21 @@ store = pathlib.Path("Sources/Pulse/Core/Services/SettingsStore.swift").read_tex
 if store.count("func displayValue") != 1:
     failures.append("SettingsStore: displayValue must be defined exactly once")
 
+# The pace tick is user-controllable, so no card may hard-code it on: a gauge
+# that always passes `window.elapsedFraction()` ignores the setting entirely,
+# which is the same class of bug as rendering a raw utilization.
+card = (UI / "Panel/LimitGaugeCard.swift").read_text()
+if "showPaceMarker" not in card:
+    failures.append("LimitGaugeCard: never consults showPaceMarker")
+for line_no, line in enumerate(card.splitlines(), 1):
+    if "paceMarker:" not in line:
+        continue
+    if "elapsedFraction()" in line and "showPaceMarker" not in line:
+        failures.append(
+            f"Panel/LimitGaugeCard.swift:{line_no}: passes elapsedFraction() "
+            f"unconditionally, ignoring the pace-marker setting -> {line.strip()}"
+        )
+
 for line in failures:
     print(f"FAIL {line}")
 

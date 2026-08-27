@@ -40,10 +40,19 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 Text(settings.gaugeDirection == .used
-                    ? "Bars fill left to right as you spend; the tick marks how much of the window has elapsed."
-                    : "Bars drain right to left like a fuel gauge; the tick marks how much of the window is left.")
+                    ? "Bars fill left to right as you spend."
+                    : "Bars drain right to left like a fuel gauge.")
                     .font(Typo.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle(isOn: $settings.showPaceMarker) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Show pace marker")
+                        Text("A tick on each gauge marking how far through the window you are, so the bar can be read against the clock: ahead of it means you are burning the limit faster than it refills.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section("Menu Bar") {

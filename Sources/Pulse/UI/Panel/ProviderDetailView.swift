@@ -31,7 +31,8 @@ struct ProviderDetailView: View {
                     window: primary,
                     trend: record.primaryTrend,
                     isStale: record.isStale,
-                    direction: settings.gaugeDirection
+                    direction: settings.gaugeDirection,
+                    showPaceMarker: settings.showPaceMarker
                 )
             }
             if let secondary = snapshot.secondary {
@@ -39,7 +40,8 @@ struct ProviderDetailView: View {
                     window: secondary,
                     trend: record.secondaryTrend,
                     isStale: record.isStale,
-                    direction: settings.gaugeDirection
+                    direction: settings.gaugeDirection,
+                    showPaceMarker: settings.showPaceMarker
                 )
             }
             if let tertiary = snapshot.tertiary {
@@ -47,14 +49,16 @@ struct ProviderDetailView: View {
                     window: tertiary,
                     trend: record.tertiaryTrend,
                     isStale: record.isStale,
-                    direction: settings.gaugeDirection
+                    direction: settings.gaugeDirection,
+                    showPaceMarker: settings.showPaceMarker
                 )
             }
             if !snapshot.extraWindows.isEmpty {
                 ExtraLimitsCard(
                     title: descriptor.id == .gemini ? "Model Quotas" : "Model Limits",
                     windows: snapshot.extraWindows,
-                    direction: settings.gaugeDirection
+                    direction: settings.gaugeDirection,
+                    showPaceMarker: settings.showPaceMarker
                 )
             }
             if snapshot.primary != nil {

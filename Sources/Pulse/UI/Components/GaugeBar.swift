@@ -13,7 +13,9 @@ import SwiftUI
 /// The optional pace tick marks where the *window clock* sits, and always
 /// tracks the fill's direction, so the two are directly comparable:
 /// fill ahead of the tick means credits are outlasting the clock, fill behind
-/// it means they are draining faster than the window refills.
+/// it means they are draining faster than the window refills. Pass `nil` to
+/// draw a plain bar; the row then loses the marker's overhang rather than
+/// keeping a gap where it used to be.
 ///
 /// Colour keys off raw `utilization` in both directions: red always means
 /// nearly exhausted, which is a long bar under `.used` and a short one under
@@ -22,10 +24,20 @@ struct GaugeBar: View {
     /// 0...100 utilization (how much is *used*), regardless of direction.
     let utilization: Double
     var color: Color? = nil
-    /// Elapsed fraction of the window, 0...1. Nil for windows with no clock
-    /// (no reset time, or a spend budget that does not refill on a timer).
+    /// Elapsed fraction of the window, 0...1, or nil to draw no tick - either
+    /// because the window has no clock (no reset time, a spend budget that
+    /// does not refill) or because the user turned the marker off.
     var paceMarker: Double? = nil
     var direction: SettingsStore.GaugeDirection = .remaining
+
+    /// The tick stands proud of the bar, so a row without one is shorter. Height
+    /// is derived from whether a marker is actually drawn, never reserved
+    /// unconditionally, or hiding the tick leaves an unexplained gap.
+    private var barHeight: CGFloat {
+        paceMarker == nil
+            ? Layout.progressBarHeight
+            : Layout.progressBarHeight + Layout.paceMarkerOverhang
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -61,6 +73,6 @@ struct GaugeBar: View {
                 }
             }
         }
-        .frame(height: Layout.progressBarHeight + Layout.paceMarkerOverhang)
+        .frame(height: barHeight)
     }
 }

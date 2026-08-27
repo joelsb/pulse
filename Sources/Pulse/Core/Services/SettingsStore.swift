@@ -66,6 +66,7 @@ final class SettingsStore {
         static let breakdownSort = "breakdownSort"
         static let useSessionTitles = "useSessionTitles"
         static let gaugeDirection = "gaugeDirection"
+        static let showPaceMarker = "showPaceMarker"
     }
 
     private let defaults: UserDefaults
@@ -95,6 +96,14 @@ final class SettingsStore {
     /// convention on its own.
     var gaugeDirection: GaugeDirection {
         didSet { defaults.set(gaugeDirection.rawValue, forKey: Key.gaugeDirection) }
+    }
+
+    /// Whether limit gauges draw the on-pace tick: the mark showing where the
+    /// window clock sits, so the bar can be read against elapsed time rather
+    /// than in isolation. Off gives a plain bar, and the row shrinks by the
+    /// marker's overhang rather than leaving a gap where it was.
+    var showPaceMarker: Bool {
+        didSet { defaults.set(showPaceMarker, forKey: Key.showPaceMarker) }
     }
 
     /// Last selected provider tab, restored when the panel reopens.
@@ -155,6 +164,12 @@ final class SettingsStore {
 
         gaugeDirection = defaults.string(forKey: Key.gaugeDirection)
             .flatMap(GaugeDirection.init(rawValue:)) ?? .remaining
+
+        // Default on: the tick is the only thing that turns a percentage into
+        // "am I ahead or behind". `object(forKey:)` rather than `bool(forKey:)`
+        // because the latter returns false for an absent key, which would
+        // silently ship the feature disabled.
+        showPaceMarker = (defaults.object(forKey: Key.showPaceMarker) as? Bool) ?? true
 
         selectedTab = defaults.string(forKey: Key.selectedTab)
             .flatMap(ProviderID.init(rawValue:)) ?? .claude
