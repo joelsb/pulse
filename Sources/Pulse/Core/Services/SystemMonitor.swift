@@ -151,6 +151,14 @@ struct ProcessSample: Sendable, Equatable, Identifiable {
 actor SystemSampler {
     private var previousTicks: CPUTicks?
     private var previousCoreTicks: [CPUTicks]?
+    /// Cumulative CPU ticks per pid from the previous table, and when it was
+    /// taken. A per-process percentage is a delta, so both are required.
+    private var previousProcessCPU: [Int32: UInt64] = [:]
+    private var previousProcessSampleTime: UInt64?
+    /// Last disk reading and when it was taken. Cached because the call is
+    /// three orders of magnitude more expensive than the rest of a tick.
+    private var cachedDisk: (free: Int64, total: Int64, purgeable: Int64)?
+    private var cachedDiskAt: UInt64?
 
     /// Cached core topology. Fixed for the life of the process, and two sysctl
     /// calls per tick is pure waste.
@@ -238,21 +246,35 @@ actor SystemSampler {
     /// without the card becoming a scroll surface.
     private let processLimit = 5
 
+    /// Per-phase timings from the last `sample()`, for the --trace-ticks probe.
+    private(set) var lastTimings = ""
+
     func sample(includeProcesses: Bool = true) -> SystemSample {
+        var phases: [String] = []
+        func phase(_ name: String, _ body: () -> Void) {
+            let start = DispatchTime.now().uptimeNanoseconds
+            body()
+            phases.append(String(format: "%@=%.1f", name, Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000))
+        }
+        defer { lastTimings = phases.joined(separator: " ") }
+
         var result = SystemSample()
         result.coreCount = ProcessInfo.processInfo.activeProcessorCount
         result.memoryTotal = Int64(ProcessInfo.processInfo.physicalMemory)
         result.thermal = ProcessInfo.processInfo.thermalState
 
-        applyCPU(to: &result)
-        applyMemory(to: &result)
-        applyLoad(to: &result)
-        applySwap(to: &result)
-        applyDisk(to: &result)
+        phase("cpu") { applyCPU(to: &result) }
+        phase("mem") { applyMemory(to: &result) }
+        phase("load") { applyLoad(to: &result) }
+        phase("swap") { applySwap(to: &result) }
+        phase("disk") { applyDisk(to: &result) }
         if includeProcesses {
-            let all = Self.readProcessTable()
-            result.topProcesses = Self.top(all, by: { $0.cpu }, limit: processLimit)
-            result.topMemoryProcesses = Self.top(all, by: { Double($0.memory) }, limit: processLimit)
+            var all: [ProcessSample] = []
+            phase("proctable") { all = readProcessTable() }
+            phase("rank") {
+                result.topProcesses = Self.top(all, by: { $0.cpu }, limit: processLimit)
+                result.topMemoryProcesses = Self.top(all, by: { Double($0.memory) }, limit: processLimit)
+            }
         }
         return result
     }
@@ -427,75 +449,186 @@ actor SystemSampler {
         sample.swapTotal = Int64(usage.xsu_total)
     }
 
+    /// Disk figures, refreshed far more slowly than everything else.
+    ///
+    /// `volumeAvailableCapacityForImportantUsage` is the number Finder shows,
+    /// and it is EXPENSIVE: it routes through CacheDelete, which computes how
+    /// much space the system could reclaim across the whole volume. Measured
+    /// inside the running app it costs **15-26 ms**, against under 0.2 ms for
+    /// every other phase of a tick combined. At a 3-second cadence that alone
+    /// was ~35% of a core with the panel open, and it was the entire cost - a
+    /// `sample` profile blamed SwiftUI layout, which was wrong.
+    ///
+    /// A standalone benchmark measured it at 0.7 ms and missed this completely,
+    /// because the second call in a loop hits a warm cache. Only in-app
+    /// per-phase timing showed the real figure. Benchmark the phase where it
+    /// runs, not in isolation.
+    ///
+    /// Free space moves in gigabytes over hours, so a 60-second refresh loses
+    /// nothing a user could perceive. The cached value is reused in between.
     private func applyDisk(to sample: inout SystemSample) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let cached = cachedDisk,
+           let taken = cachedDiskAt,
+           Double(now - taken) / 1_000_000_000 < Self.diskRefreshInterval {
+            sample.diskFree = cached.free
+            sample.diskTotal = cached.total
+            sample.diskPurgeable = cached.purgeable
+            return
+        }
+
         let url = URL(fileURLWithPath: NSHomeDirectory())
         guard let values = try? url.resourceValues(forKeys: [
             .volumeAvailableCapacityForImportantUsageKey,
             .volumeAvailableCapacityKey,
             .volumeTotalCapacityKey,
         ]) else { return }
-        // "Important usage" is the number Finder shows: it counts purgeable
-        // space the system would evict for you, unlike volumeAvailableCapacity.
-        //
+
         // Reading the HOME directory, not "/": on APFS the root is a read-only
         // system snapshot, so `df /` reports 51% while the data volume holding
         // the user's files is at 97%. A clean, plausible, wrong answer.
-        sample.diskFree = values.volumeAvailableCapacityForImportantUsage ?? 0
-        sample.diskTotal = Int64(values.volumeTotalCapacity ?? 0)
+        let free = values.volumeAvailableCapacityForImportantUsage ?? 0
+        let total = Int64(values.volumeTotalCapacity ?? 0)
         // The difference between the two available-capacity keys IS the
         // reclaimable cache; there is no direct "purgeable" key.
         let immediatelyFree = Int64(values.volumeAvailableCapacity ?? 0)
-        sample.diskPurgeable = max(0, sample.diskFree - immediatelyFree)
+        let purgeable = max(0, free - immediatelyFree)
+
+        cachedDisk = (free: free, total: total, purgeable: purgeable)
+        cachedDiskAt = now
+        sample.diskFree = free
+        sample.diskTotal = total
+        sample.diskPurgeable = purgeable
     }
+
+    /// Seconds between real disk reads. See `applyDisk` for why this is not the
+    /// tick interval.
+    private static let diskRefreshInterval: Double = 60
 
     // MARK: - Processes
 
-    /// Full process table via `ps`, ranked afterwards. libproc would avoid the
-    /// spawn, but it has no per-process CPU *percentage* — only cumulative
-    /// time, which would need its own per-pid delta bookkeeping for a card that
-    /// refreshes every two seconds while a panel is open.
+    /// Full process table with no subprocess: one `sysctl(KERN_PROC_ALL)` for
+    /// pids and names, then one `proc_pid_rusage` per pid for memory and CPU.
     ///
-    /// One spawn serves both cards: asking `ps` twice with different sort flags
-    /// would double the cost and, worse, let the two lists come from different
-    /// instants, so a process could appear with disagreeing figures in the two
-    /// cards at the same moment.
-    private static func readProcessTable() -> [ProcessSample] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        // -c shows the executable name without its full path. No sort flag:
-        // ranking happens here, once per metric.
-        process.arguments = ["-Aceo", "pid,pcpu,rss,comm"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+    /// WHY NOT `ps`: spawning it measured at **82-100 ms per tick** on this
+    /// machine, against **0.45 ms** for the syscall pair - about 180x. The
+    /// sidebar samples every 2 s while the panel is open, so the spawn alone was
+    /// ~4% of a core sustained, plus a fork+exec of a 600-process table 30 times
+    /// a minute. That was the single largest cost in the whole feature and none
+    /// of it bought anything the kernel does not hand over directly.
+    ///
+    /// The reason `ps` was reached for first: rusage reports CUMULATIVE cpu
+    /// time, not a percentage, so a per-pid delta between ticks is needed. That
+    /// bookkeeping is `previousProcessCPU` below, and it is worth it.
+    ///
+    /// One pass serves both cards, so a process cannot appear with disagreeing
+    /// figures in the two lists at the same moment.
+    /// Internal rather than private so a verifier can assert on the FULL table.
+    /// The cards are top-5 lists and a rusage-denied row reports zero for both
+    /// metrics, so it can never place in one - meaning the approximate flag is
+    /// unobservable from the cards alone and went untested for a whole session.
+    func readProcessTable() -> [ProcessSample] {
+        let entries = Self.allProcesses()
+        guard !entries.isEmpty else { return [] }
 
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        let now = DispatchTime.now().uptimeNanoseconds
+        // Elapsed wall time since the last table, which is what a CPU
+        // percentage is measured against.
+        let elapsedNanos = previousProcessSampleTime.map { Double(now &- $0) } ?? 0
+        defer { previousProcessSampleTime = now }
 
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        // No limit here: the table must be complete before it can be ranked, or
-        // the memory card would only ever rank the first N lines `ps` printed.
-        let rows = parseProcessList(text, limit: Int.max)
-        // RSS from `ps` is only the fallback; the real figure is each process's
-        // physical footprint, which has to be asked for per pid.
-        return rows.map { row in
-            var row = row
-            if let footprint = Self.footprintBytes(row.pid) {
-                row.memory = footprint
+        var currentCPU: [Int32: UInt64] = [:]
+        currentCPU.reserveCapacity(entries.count)
+        var rows: [ProcessSample] = []
+        rows.reserveCapacity(entries.count)
+
+        for entry in entries {
+            var row = ProcessSample(pid: entry.pid, name: entry.name, cpu: 0, memory: 0)
+
+            if let usage = Self.processUsage(entry.pid) {
+                row.memory = usage.footprint
+                currentCPU[entry.pid] = usage.cpuTicks
+
+                // A percentage needs two readings. Without a baseline the row
+                // reports 0 rather than a since-launch average, which is a real
+                // number answering a different question.
+                if elapsedNanos > 0, let previous = previousProcessCPU[entry.pid] {
+                    // ri_user_time / ri_system_time are in MACH TICKS on Apple
+                    // Silicon, NOT nanoseconds. See `machTicksToNanos`.
+                    let usedNanos = Double(usage.cpuTicks &- previous) * Self.machTicksToNanos
+                    row.cpu = max(0, usedNanos / elapsedNanos * 100)
+                }
             } else {
-                // Denied (root-owned process). Keep RSS so the row still has a
-                // number, but mark it, because RSS and footprint are different
-                // measurements and mixing them silently would make the ranking
-                // dishonest.
+                // Root-owned process: rusage is denied, so neither figure is
+                // available. Marked so an unknown is never shown as a real
+                // measurement.
                 row.memoryIsApproximate = true
             }
-            return row
+            rows.append(row)
         }
+
+        previousProcessCPU = currentCPU
+        return rows
+    }
+
+    /// Nanoseconds per unit of `ri_user_time` / `ri_system_time`.
+    ///
+    /// THE FIELDS ARE NOT NANOSECONDS on Apple Silicon, despite reading like a
+    /// duration. `mach_timebase_info` reports numer=125 denom=3 on this M4, so
+    /// one unit is 41.667 ns. Treating them as nanoseconds under-reports every
+    /// process by exactly that factor: `herdr` showed 0.5% against `ps`'s 20.4%,
+    /// which is a perfectly plausible "quiet machine" reading and completely
+    /// wrong. With the conversion applied the two agree to within noise
+    /// (12.6% vs 12.4%).
+    private static let machTicksToNanos: Double = {
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom > 0 else { return 1 }
+        return Double(timebase.numer) / Double(timebase.denom)
+    }()
+
+    /// Every live process's pid and short name, in one syscall.
+    static func allProcesses() -> [(pid: Int32, name: String)] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size = 0
+        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+
+        // Processes can appear between the sizing call and the data call, so the
+        // buffer is over-allocated rather than sized exactly; a short read would
+        // silently truncate the table.
+        var procs = [kinfo_proc](
+            repeating: kinfo_proc(),
+            count: size / MemoryLayout<kinfo_proc>.stride + 32
+        )
+        size = procs.count * MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, 4, &procs, &size, nil, 0) == 0 else { return [] }
+
+        let count = size / MemoryLayout<kinfo_proc>.stride
+        var out: [(pid: Int32, name: String)] = []
+        out.reserveCapacity(count)
+        for index in 0..<min(count, procs.count) {
+            var entry = procs[index]
+            let pid = entry.kp_proc.p_pid
+            guard pid > 0 else { continue }
+            let name = withUnsafeBytes(of: &entry.kp_proc.p_comm) { raw in
+                String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+            }
+            guard !name.isEmpty else { continue }
+            out.append((pid: pid, name: name))
+        }
+        return out
+    }
+
+    /// Footprint and cumulative CPU for one pid, in a single call. nil when the
+    /// kernel refuses (root-owned processes).
+    static func processUsage(_ pid: Int32) -> (footprint: Int64, cpuTicks: UInt64)? {
+        var info = rusage_info_v6()
+        let result = withUnsafeMutablePointer(to: &info) { pointer -> Int32 in
+            let reinterpreted = UnsafeMutableRawPointer(pointer)
+                .assumingMemoryBound(to: rusage_info_t?.self)
+            return proc_pid_rusage(pid, RUSAGE_INFO_V6, reinterpreted)
+        }
+        guard result == 0 else { return nil }
+        return (Int64(info.ri_phys_footprint), info.ri_user_time &+ info.ri_system_time)
     }
 
     /// A process's physical footprint in bytes: the number Activity Monitor
@@ -535,24 +668,6 @@ actor SystemSampler {
         processes.sorted { metric($0) > metric($1) }.prefix(limit).map { $0 }
     }
 
-    /// Split out from the spawn so the parsing is testable against captured
-    /// `ps` output rather than whatever happens to be running.
-    static func parseProcessList(_ text: String, limit: Int) -> [ProcessSample] {
-        var rows: [ProcessSample] = []
-        for line in text.split(separator: "\n").dropFirst() {
-            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard fields.count >= 4,
-                  let pid = Int32(fields[0]),
-                  let cpu = Double(fields[1]),
-                  let rss = Int64(fields[2])
-            else { continue }
-            // A command can contain spaces, so everything after RSS is the name.
-            let name = fields.dropFirst(3).joined(separator: " ")
-            rows.append(ProcessSample(pid: pid, name: name, cpu: cpu, memory: rss * 1024))
-            if rows.count == limit { break }
-        }
-        return rows
-    }
 }
 
 /// Observable machine stats for the panel: polls only while something is
@@ -572,8 +687,17 @@ final class SystemMonitor {
     private(set) var hasSample = false
 
     /// Seconds between readings while visible. Fast enough to watch an agent
-    /// spin up a build, slow enough that the `ps` spawn is noise.
-    var interval: TimeInterval = 2
+    /// spin up a build, slow enough that the work is invisible.
+    ///
+    /// 2 s was the first choice and it was too fast, for a reason that has
+    /// nothing to do with sampling: reading the counters costs under 1 ms, but
+    /// every tick publishes new values into ~10 observed views and SwiftUI
+    /// re-runs the whole panel's layout. `sample` showed Pulse at 29-43% CPU
+    /// with the panel open, essentially all of it in `LayoutEngineBox` and
+    /// `StackLayout`, not in the sampler. 3 s halves that with no practical
+    /// loss of resolution - the numbers are for judging headroom, not for
+    /// profiling.
+    var interval: TimeInterval = 3
 
     static let historyLimit = 60
 
@@ -603,13 +727,33 @@ final class SystemMonitor {
     }
 
     func poll() async {
+        let sampleStart = DispatchTime.now().uptimeNanoseconds
         let next = await sampler.sample()
+        let sampled = DispatchTime.now().uptimeNanoseconds
+        let breakdown = await sampler.lastTimings
         apply(next)
+        let applied = DispatchTime.now().uptimeNanoseconds
+        if ProcessInfo.processInfo.arguments.contains("--trace-ticks") {
+            let sampleMS = Double(sampled - sampleStart) / 1_000_000
+            let applyMS = Double(applied - sampled) / 1_000_000
+            let line = String(format: "sample=%.2fms apply=%.2fms | %@\n", sampleMS, applyMS, breakdown)
+            if let handle = FileHandle(forWritingAtPath: "/tmp/pulse-ticks.log") {
+                handle.seekToEndOfFile()
+                handle.write(Data(line.utf8))
+                try? handle.close()
+            } else {
+                try? line.write(toFile: "/tmp/pulse-ticks.log", atomically: false, encoding: .utf8)
+            }
+        }
     }
 
     /// Separated from `poll` so tests can drive the observable state without a
     /// real host reading.
     func apply(_ next: SystemSample) {
+        // Publishing an identical sample still invalidates every observed view
+        // and re-runs the panel's layout, which is where the CPU actually goes.
+        // A machine sitting still therefore costs nothing now.
+        guard next != sample || !hasSample else { return }
         sample = next
         hasSample = true
         Self.append(next.cpuTotal, to: &cpuHistory)

@@ -67,16 +67,21 @@ run_case() {
 
   case "$defect" in
     "") ;;
-    memory-uses-rss-not-footprint)
-      # Defect: the footprint lookup is skipped and ps RSS is reported instead.
-      # THE bug Joel found on screen: RSS understates by 0.89x to 11.6x
-      # depending on the process, so multi-gigabyte apps vanish from the card
-      # and the ranking silently comes out in the wrong order. Every value is
-      # still a plausible positive byte count, so only agreement with an
-      # independent implementation catches it.
+    cpu-missing-timebase)
+      # Defect: ri_user_time treated as nanoseconds. On Apple Silicon it is mach
+      # ticks (41.67 ns each), so every process reads 41.67x too low - herdr at
+      # 0.5% instead of 20.4%. A perfectly plausible "quiet machine" reading.
       swap "$dir/src/SystemMonitor.swift" \
-        'if let footprint = Self.footprintBytes(row.pid) {' \
-        'if let footprint = Optional<Int64>.none {'
+        'return Double(timebase.numer) / Double(timebase.denom)' \
+        'return 1'
+      ;;
+    process-table-truncated)
+      # Defect: the sysctl buffer sized exactly from the first call, so any
+      # process starting in between silently truncates the table. A short table
+      # is still a valid-looking table.
+      swap "$dir/src/SystemMonitor.swift" \
+        'count: size / MemoryLayout<kinfo_proc>.stride + 32' \
+        'count: size / MemoryLayout<kinfo_proc>.stride / 4'
       ;;
     approximate-never-flagged)
       # Defect: a denied footprint keeps RSS but is not marked, so two different
@@ -84,13 +89,6 @@ run_case() {
       swap "$dir/src/SystemMonitor.swift" \
         'row.memoryIsApproximate = true' \
         'row.memoryIsApproximate = false'
-      ;;
-    rss-as-bytes)
-      # Defect: treat `ps` RSS as bytes. Renders a plausible "1 MB" for a
-      # process holding a gigabyte — wrong by 1024x and invisible on screen.
-      swap "$dir/src/SystemMonitor.swift" \
-        "memory: rss * 1024" \
-        "memory: rss"
       ;;
     memory-total-minus-free)
       # Defect: the classic wrong memory reading — everything not free counted
@@ -176,15 +174,15 @@ run_case() {
       # reports a constant 0 B. Looks like a Mac with nothing to reclaim, which
       # is indistinguishable from the feature being broken.
       swap "$dir/src/SystemMonitor.swift" \
-        'sample.diskPurgeable = max(0, sample.diskFree - immediatelyFree)' \
-        'sample.diskPurgeable = 0'
+        'let purgeable = max(0, free - immediatelyFree)' \
+        'let purgeable = Int64(0)'
       ;;
     purgeable-subtraction-flipped)
       # Defect: subtraction the wrong way round. max(0,) then clamps it to zero,
       # so the row silently disappears rather than showing a negative.
       swap "$dir/src/SystemMonitor.swift" \
-        'sample.diskPurgeable = max(0, sample.diskFree - immediatelyFree)' \
-        'sample.diskPurgeable = max(0, immediatelyFree - sample.diskFree)'
+        'let purgeable = max(0, free - immediatelyFree)' \
+        'let purgeable = max(0, immediatelyFree - free)'
       ;;
     memory-history-in-bytes)
       # Defect: memory history fed raw bytes instead of utilization, pegging the
@@ -215,12 +213,6 @@ run_case() {
         "return trimmed(magnitude / 1_000_000_000) + \"G\"" \
         "return trimmed(magnitude / 1_000_000_000) + \" G\""
       ;;
-    no-process-limit)
-      # Defect: the row limit ignored, so the card lists every process running.
-      swap "$dir/src/SystemMonitor.swift" \
-        "if rows.count == limit { break }" \
-        "if rows.count == Int.max { break }"
-      ;;
     *)
       echo "unknown defect: $defect"; exit 1 ;;
   esac
@@ -244,9 +236,9 @@ fi
 echo
 echo "=== planted defects (each MUST be caught) ==="
 DEFECTS=(
-  memory-uses-rss-not-footprint
+  cpu-missing-timebase
+  process-table-truncated
   approximate-never-flagged
-  rss-as-bytes
   memory-total-minus-free
   disk-shows-free-not-used
   load-not-per-core
@@ -254,7 +246,6 @@ DEFECTS=(
   sparkline-inverted
   sparkline-unclamped
   bytes-base-1024
-  no-process-limit
   bundle-id-middle-truncated
   compact-bytes-has-space
   memory-card-resorts-cpu-list
