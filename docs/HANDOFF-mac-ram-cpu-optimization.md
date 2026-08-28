@@ -3,7 +3,7 @@
 **Date:** 2026-08-28
 **Machine:** Mac16,13 (Apple M4, 4 Performance + 6 Efficiency cores, 16 GB RAM, 460 GB volume)
 **Priority order Joel gave:** RAM first, CPU second.
-**Status:** omniroute removed. 5.2 GB disk reclaimed. Pulse's own CPU cost partly fixed, one thread still unexplained.
+**Status:** omniroute removed. 5.2 GB disk reclaimed. **Pulse's panel-open CPU cost is FOUND AND FIXED** (34% of a core -> 0.3%), committed with a CI gate. One smaller item newly found and still open: a 2.6-second refresh burst every 60 seconds.
 
 ---
 
@@ -11,9 +11,11 @@
 
 This file exists because the work spans two things at once: **auditing Joel's machine** (what should not be running) and **fixing Pulse itself** (which turned out to be one of the worst offenders, at ~36% of a core with its panel open).
 
-There is **one uncommitted change that must not ship as-is**: `Sources/Pulse/Core/Services/SystemMonitor.swift` currently contains `--trace-ticks` instrumentation added for profiling. It is gated behind a launch argument and writes to `/tmp/pulse-ticks.log`. Decide whether to keep it (it earned its place - see §4) or strip it before committing.
+**The Pulse CPU investigation is now closed.** The cause was one `.animation(_:value:)` modifier in `PanelFooter` whose animated value derived from a `TimelineView`'s clock, so it restarted every second and never completed. A permanently in-flight animation makes SwiftUI redraw at display rate. Details, measurements and the CI gate are in §4.
 
-Working directory for all Pulse work: `~/MYNE/Projects/pulse`. Last commit: `bc8767a`.
+`--trace-ticks` was **kept deliberately** (it is what found the disk cost after `sample` pointed at the wrong place). Everything is committed; nothing is left uncommitted from this line of work.
+
+Working directory for all Pulse work: `~/MYNE/Projects/pulse`. Commits: `9ca3683` (the animation fix + gate), `8ec2a93` (sampler: sysctl process table, disk cache, trace-ticks).
 
 ---
 
@@ -120,61 +122,72 @@ io.datainnovation.mcp-reaper                  (not running)
 4. **Spotify's 8 processes / 1.25 GB.** Quitting when unused is a habit change, not a fix.
 
 ### CPU
-5. **Finish Pulse's panel-open cost.** See §4. Was 37%, disk fix took the per-tick work from 28 ms to 1-5 ms, but the process still measured 36.6% afterwards - so **something else is also burning CPU and has not been found yet**. This is the one genuinely unfinished investigation.
-6. **Decide the fate of the `--trace-ticks` instrumentation** before committing.
-7. **WindowServer at 33-46%** was the top CPU consumer all session. Usually means a lot of window/animation work. Possibly related to the pinned Pulse panel being open during measurement - re-measure with the panel closed before chasing it.
+5. ~~**Finish Pulse's panel-open cost.**~~ **DONE.** 34% -> 0.3%, one `.animation` modifier. See §4. Committed as `9ca3683` with a CI gate.
+6. ~~**Decide the fate of `--trace-ticks`.**~~ **DONE - kept**, gated behind the launch argument. It is what found the disk cost; committed as `8ec2a93`.
+7. **Pulse's 2.6-second refresh burst every 60 s** with the panel closed. Newly found, still open, suspected to be a ~14 MB cache file being reserialized on every refresh. Full detail and the next diagnostic step in §4.1.
+8. **WindowServer at 33-46%** was the top CPU consumer all session. **Re-measure this first** - it was measured while the Pulse panel was pinned open, which we now know was redrawing at display rate and would drive WindowServer hard by itself. It may already be gone.
 
 ### Disk
-8. **Whisper models: 4.4 GB.** One question to Joel unlocks up to 4.2 GB.
-9. `~/MYNE` at 214 GB needs its own pass.
+9. **Whisper models: 4.4 GB.** One question to Joel unlocks up to 4.2 GB.
+10. **~60 MB of stale `pricecheck-*` / `verify-*` files** in `~/Library/Application Support/Pulse/Cache/`, left by verifier runs. Small, but they are Pulse's own mess.
+11. `~/MYNE` at 214 GB needs its own pass.
 
 ---
 
-## 4. Pulse's own CPU cost: what was found, what is still open
+## 4. Pulse's own CPU cost: FOUND AND FIXED
 
-This started because Joel said "even Pulse is spending too much". He was right, and the sidebar built earlier this session was the cause.
+This started because Joel said "even Pulse is spending too much". He was right. The cause was not the sidebar, not the sampler, and not SwiftUI layout, all three of which were blamed first.
 
-### Measurements (all on this machine, panel pinned open)
+### The bug
+
+`PanelFooter`:
+
+```swift
+TimelineView(.periodic(from: .now, by: 1)) { context in
+    Text(statusText(now: context.date))
+        .contentTransition(.numericText())
+        .animation(Motion.numberTick, value: statusText(now: context.date))  // <- 34% of a core
+}
+```
+
+`.animation(_:value:)` starts an animation whenever `value` changes. That value is a string derived from the timeline's clock, so it changed on **every tick**: the animation never finished before the next began, and a permanently in-flight animation makes SwiftUI redraw that layer tree at **display rate** (60-120 Hz) instead of once per second.
+
+`SystemColumn` had the identical bug on the CPU and Memory percentages at the 3-second sample cadence, worth ~10% -> ~3%. That is why the sidebar looked guilty: it was guilty of a smaller instance of the same mistake.
+
+Deleting the modifiers loses nothing visually. `contentTransition(.numericText())` still animates the digit change, driven by the value actually changing.
+
+### Measurements (M4, cumulative CPU time over 60s windows, `ps -o time`)
 
 | State | CPU |
 |---|---|
-| Panel **closed** | **0.0%** - ref-counted polling works, nothing runs |
-| Panel open, sidebar **off** | 0.2% steady state |
-| Panel open, sidebar **on** (before fixes) | **37.3%** of one core |
-| Panel open, sidebar on (after disk fix) | still 36.6% - **unexplained** |
+| Panel closed, idle | **0.0%** |
+| Panel closed, averaged over a refresh cycle | 4.3% (see §4.1 - a 2.6 s burst every 60 s) |
+| Panel open, sidebar off, **before** the fix | **34.0%** steady |
+| Panel open, sidebar off, **after** the fix | **0.3%** steady |
+| Panel open, sidebar on with process cards, after both fixes | **2-5%** |
 
-### Fix 1: the `ps` spawn (committed, 100x)
+### Why it took three attempts to find
 
-The process table was read by spawning `/bin/ps`. Measured **82-100 ms per tick**. Replaced with `sysctl(KERN_PROC_ALL)` + `proc_pid_rusage` per pid: **0.45-0.8 ms**, about 100x cheaper. Verified by a benchmark assertion in the verifier so it cannot regress.
+- `sample` attributes the time to `LayoutEngineBox` and `StackLayout`. That is where the redraws *land*, not where they *originate*, so the profile pointed at layout and a `geometryGroup()` isolation change was made that did nothing.
+- The handoff's earlier "panel closed = 0.0%, panel open with sidebar off = 0.2%" figures were wrong. `--pin-panel` does not OPEN the panel, it only blocks dismissal, so an earlier measurement labelled "panel open" was taken with the panel closed. **Use `--show-panel --pin-panel` together, and confirm with a screenshot before trusting any number.**
+- What isolated it: toggling ONE modifier at a time on the same build behind a launch flag, and reading cumulative CPU time in 5-second buckets. Per-bucket sampling also separated steady load from a periodic burst, which a single 60-second average hides completely.
 
-### Fix 2: the disk call (uncommitted, 28 ms -> 0 ms)
+### The gate
 
-**This is the important finding.** `volumeAvailableCapacityForImportantUsage` - needed because it is the figure Finder shows - routes through `CacheDelete`, which computes reclaimable space across the whole volume and emits `os_log` traffic while doing it. In-app per-phase timing:
+- `scripts/check-timeline-animation.py` fails when an animated value reads `context.date` inside a periodic `TimelineView`. It deliberately ALLOWS an animation on a value that does not: six lines above the offending one, the same file animates `staleness.level`, which stays constant for minutes and costs nothing measurable. Escape hatch: `// timeline-animation-ok: <reason>`.
+- `scripts/verify-timeline-animation.sh` plants five variants of the real defect (including a wrapped-onto-two-lines form), requires each to be caught, requires the two legitimate cases to pass, and requires a clean run after reverting. Currently **5 caught, 2 allowed**.
+- Both are documented in `CONTRIBUTING.md` under Test.
 
-```
-before: sample=28.32ms | cpu=0.0 mem=0.0 load=0.0 swap=0.0 disk=25.7 proctable=2.2 rank=0.1
-after:  sample=1.22ms  | cpu=0.0 mem=0.0 load=0.0 swap=0.0 disk=0.0  proctable=1.1 rank=0.0
-```
+### 4.1 STILL OPEN: a 2.6-second burst every 60 seconds
 
-Fixed by caching the disk reading for 60 seconds. Free space moves in gigabytes over hours, so nothing perceptible is lost.
+With the panel **closed**, Pulse is genuinely 0.0% while idle, then spends **2.6 seconds of CPU in one burst every 60 seconds** - the provider refresh (`refreshInterval` defaults to 60 s). Averaged, that is the 4.3% a naive one-minute measurement reports.
 
-### Fix 3: tick interval 2 s -> 3 s, and skip no-op publishes (uncommitted)
-
-`apply()` now returns early when the new sample equals the old one, since publishing an identical value still invalidates every observed view.
-
-### STILL OPEN: the missing ~35%
-
-After fix 2 the per-tick work is 1-5 ms every 3 seconds, which is well under 1% of a core. **The process still measured 36.6%.** So the tick is not the whole cost and the remaining consumer has not been identified.
-
-What was already ruled out:
-- **Not the process cards.** Turning them off changed 37.3% -> 35.6%.
-- **Not the sampler.** In-app timing accounts for only 1-5 ms per 3 s.
-- **Not SwiftUI layout**, despite `sample` pointing there. The layout symbols were 38 samples out of 2529, i.e. noise. `geometryGroup()` isolation was added anyway and changed nothing measurable.
-- **Not `apply()`.** 0.03-0.19 ms.
-
-Next diagnostic step, not yet run: measure sidebar-off vs sidebar-on **on the same build** with the disk fix in place, both at steady state after 40+ seconds. The last attempt at this was interrupted. If sidebar-off is ~0.2% and sidebar-on is ~36% while ticks cost 5 ms, then the cost is in **view invalidation frequency rather than tick work** - suspect the two `Sparkline`s, whose `values` array changes identity every tick, and `TimelineView(.periodic(by: 1))` in `PanelFooter` re-evaluating a tree that now contains ~10 more views.
-
----
+What is known:
+- It is the JSONL log parse, not the network call.
+- `FileAggregationCache` already avoids re-parsing unchanged files, so the burst is **not** re-parsing 3554 Claude session files.
+- The suspicion is the cache's own persistence. `~/Library/Application Support/Pulse/Cache/jcode-files-v3.json` is **14 MB** and `claude-files-v2.json` is 4.8 MB. Measured standalone: 79 ms to parse and 69 ms to reserialize the 14 MB file. `persist()` rewrites the WHOLE dictionary whenever `changedCount > 0`, and with jcode sessions being written continuously there is always at least one changed file, so a ~14 MB encode-and-write likely happens every refresh, for every account. Six cache files exist.
+- Not yet confirmed in-app. **Next step: put the same per-phase timing that found the disk cost around `loadIfNeeded`/`persist`/`aggregates`, run with the panel closed, and read `/tmp/pulse-ticks.log`.** Do not benchmark it standalone - that is exactly the mistake that hid the disk cost for a session (see domain note 4).
+- That directory also holds ~60 MB of stale `pricecheck-*` and `verify-*` cache files from earlier verifier runs, which is a separate small cleanup.
 
 ## 5. Domain notes worth keeping (things that cost real time this session)
 
@@ -194,7 +207,15 @@ Next diagnostic step, not yet run: measure sidebar-off vs sidebar-on **on the sa
 
 8. **A tolerance larger than the value it checks tests nothing.** A 1 GB tolerance on a 0.75 GB figure let two planted defects through while looking rigorous.
 
-9. **`--pin-panel` disables every dismissal path** (ESC, click-outside, focus loss, status-item toggle). Launching Pulse with it looks exactly like the app hanging. This confused Joel twice; it is documented in `PanelController.swift` now.
+9. **A per-tick `.animation(_:value:)` in SwiftUI redraws at DISPLAY rate, not at tick rate.** `.animation(_:value:)` starts an animation each time `value` changes; if the value derives from a `TimelineView`'s clock it changes every tick, so the animation restarts before finishing and never leaves the in-flight state. One such line in a 1-second footer cost **34% of a core**; the same mistake at a 3-second cadence cost ~7%. The tell is that CPU scales with the TICK INTERVAL rather than with the work per tick. `contentTransition` alone is safe - it keys off the value actually changing. Recognise it by asking, of every `.animation(_:value:)`: *can this value change on a timer?*
+
+10. **`--show-panel` opens the panel; `--pin-panel` only stops it closing.** Measuring "panel open" with `--pin-panel` alone measures a CLOSED panel and returns a clean, plausible, wrong number - which is how the previous session recorded 0.2% for a state that actually cost 34%. Always confirm the window is on screen with a screenshot before recording a figure.
+
+11. **A 60-second average hides a periodic burst completely.** Pulse with the panel closed reads 4.3% averaged, which looks like a small constant leak worth ignoring. In 5-second buckets it is 0.0% idle plus one 2.6-second burst per minute - a completely different bug with a completely different fix. Sample in buckets shorter than the period you suspect.
+
+12. **`git checkout <file>` in a repo with 30+ uncommitted files is destructive and unrecoverable.** Done twice this session while toggling experiments, wiping another session's uncommitted `GaugeBar.swift` (recovered from a `/tmp` worktree that happened to have it) and the `geometryGroup()` work in `SystemColumn.swift` (not recovered - it turned out to be unnecessary). **Toggle behaviour behind a launch flag, never by editing and reverting.** `git worktree list` is the recovery path worth checking first.
+
+13. **`--pin-panel` disables every dismissal path** (ESC, click-outside, focus loss, status-item toggle). Launching Pulse with it looks exactly like the app hanging. This confused Joel twice; it is documented in `PanelController.swift` now.
 
 ---
 
@@ -205,9 +226,33 @@ Committed this session:
 - `3b0122c` memory sparkline + reclaimable-cache figure
 - `c1c71a9` P/E core split
 - `bc8767a` phys_footprint for process memory, dropped the secondary metric column
+- `9b7eba2` this handoff
+- **`9ca3683` the animation fix (34% -> 0.3%) + `check-timeline-animation.py` + its meta-test + CONTRIBUTING**
+- **`8ec2a93` sysctl process table, 60 s disk cache, 3 s interval, no-op publish guard, `--trace-ticks` kept**
 
-**Uncommitted in `SystemMonitor.swift`:** the `ps` -> sysctl replacement, the disk cache, the 3 s interval, the no-op publish guard, and the `--trace-ticks` instrumentation. The verifier (`scripts/verify-system-stats.sh`) is at **20 planted defects, all caught**, and includes a benchmark assertion that fails if a subprocess spawn returns to the tick path.
+Nothing from this line of work is left uncommitted.
 
-Verifier command: `bash scripts/verify-system-stats.sh` (~2 min; `swift test` cannot run on this machine - no Xcode, so the `Testing` module is unavailable and every test file fails to compile).
+**The repo still has ~30 dirty files from OTHER sessions** (pace marker, multi-account, pricing, jcode sub-agent attribution). They were deliberately not touched, not staged, and not reverted. `docs/HANDOFF-jcode-subagent-attribution.md` covers that work.
 
-Other repo files touched: `Sources/Pulse/UI/System/SystemColumn.swift`, `Sources/Pulse/Core/Services/Formatters.swift`, `Sources/Pulse/UI/Charts/Sparkline.swift`, `scripts/system-stats-harness.swift`.
+Verifiers, all currently passing:
+```sh
+python3 scripts/check-timeline-animation.py   # PASS: 24 view files
+bash scripts/verify-timeline-animation.sh     # PASS: 5 planted caught, 2 legitimate allowed
+python3 scripts/check-gauge-direction.py      # PASS: 2 surfaces
+bash scripts/verify-system-stats.sh           # OK: 20 planted defects all caught (~2 min)
+```
+
+Two anchors in `verify-system-stats.sh` went stale when the disk cache rewrote those lines. It printed `defect anchor not found` and FAILED rather than silently reporting a pass, which is the property that check exists for. Anchors updated in `8ec2a93`.
+
+`swift test` cannot run on this machine - no Xcode, so the `Testing` module is unavailable and every test file fails to compile. `swift build` works.
+
+### How to measure Pulse's CPU (reproducible)
+
+```sh
+# open the panel for real, and keep it open
+open -a /Applications/Pulse.app --args --show-panel --pin-panel
+
+# 5-second buckets: separates steady load from a periodic burst
+bash scripts/measure-pulse-cpu.sh 5 12
+```
+`scripts/measure-pulse-cpu.sh` is committed, and its header carries both traps: `--pin-panel` without `--show-panel` measures a closed panel, and a single 60-second average hides a periodic burst. Read cumulative CPU time (`ps -o time`), not `sample`, and confirm the panel is on screen with a screenshot before recording a figure.
