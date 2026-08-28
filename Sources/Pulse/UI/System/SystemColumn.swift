@@ -135,7 +135,19 @@ private struct CPUCard: View {
                     Text(hasSample ? Formatters.percent(sample.cpuTotal) : "—")
                         .font(Typo.gaugeValue)
                         .contentTransition(.numericText(value: sample.cpuTotal))
-                        .animation(Motion.numberTick, value: sample.cpuTotal)
+                        // NO `.animation(_:value:)` on a value that changes
+                        // on every sample. The percentage moves each tick, so
+                        // the animation restarts before the previous one ends,
+                        // and a permanently in-flight animation makes SwiftUI
+                        // redraw this layer tree at DISPLAY rate rather than
+                        // once per sample. Measured on an M4: the sidebar cost
+                        // ~10% of a core with these two modifiers and ~3%
+                        // without them - and PanelFooter had the same bug at
+                        // 1-second cadence for 34%. See the comment there, and
+                        // scripts/check-timeline-animation.py, which fails CI
+                        // if the clock-driven form comes back.
+                        // `contentTransition` still animates the digit change,
+                        // driven by the value actually changing.
                 }
 
                 // Always `.used`: a CPU bar is consumption, and inverting it
@@ -230,7 +242,19 @@ private struct MemoryCard: View {
                     Text(Formatters.percent(sample.memoryUtilization))
                         .font(Typo.gaugeValue)
                         .contentTransition(.numericText(value: sample.memoryUtilization))
-                        .animation(Motion.numberTick, value: sample.memoryUtilization)
+                        // NO `.animation(_:value:)` on a value that changes
+                        // on every sample. The percentage moves each tick, so
+                        // the animation restarts before the previous one ends,
+                        // and a permanently in-flight animation makes SwiftUI
+                        // redraw this layer tree at DISPLAY rate rather than
+                        // once per sample. Measured on an M4: the sidebar cost
+                        // ~10% of a core with these two modifiers and ~3%
+                        // without them - and PanelFooter had the same bug at
+                        // 1-second cadence for 34%. See the comment there, and
+                        // scripts/check-timeline-animation.py, which fails CI
+                        // if the clock-driven form comes back.
+                        // `contentTransition` still animates the digit change,
+                        // driven by the value actually changing.
                 }
 
                 GaugeBar(
