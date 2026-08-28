@@ -162,3 +162,46 @@ struct ProviderRegistryTests {
         #expect(ProviderID.allCases == first)
     }
 }
+
+/// The Usage Breakdown window offers a tab per breakdown-capable provider. Every
+/// discovered Claude account is capable, so capability alone is the wrong filter:
+/// it showed a tab for accounts the user had switched off, including ones with no
+/// projects at all.
+@Suite("Breakdown provider selection")
+struct BreakdownProviderSelectionTests {
+    /// Mirrors `BreakdownViewModel.supportedProviders`.
+    private func offered(capable: [ProviderID], enabled: [ProviderID]) -> [ProviderID] {
+        let set = Set(enabled)
+        return capable.filter(set.contains)
+    }
+
+    /// Mirrors the selection fallback in `init` and in `show(initialProvider:)`.
+    private func selection(preferred: ProviderID, offered: [ProviderID]) -> ProviderID {
+        offered.contains(preferred) ? preferred : (offered.first ?? .claude)
+    }
+
+    private let elara = ProviderID.claudeAccount(suffix: "elara")
+    private let joeld = ProviderID.claudeAccount(suffix: "joeld")
+    private var capable: [ProviderID] { [.claude, elara, joeld, .codex] }
+
+    @Test func disabledAccountsAreNotOffered() {
+        let shown = offered(capable: capable, enabled: [.claude, elara, .codex])
+        #expect(!shown.contains(joeld), "a disabled account must not get a tab")
+        #expect(shown.contains(elara))
+        #expect(shown == [.claude, elara, .codex], "canonical order, not enabled order")
+    }
+
+    /// The selection is persisted and the window is cached, so a provider
+    /// disabled since the last open would otherwise stay selected with no tab.
+    @Test func selectionFallsBackOffADisabledProvider() {
+        let shown = offered(capable: capable, enabled: [.claude, elara, .codex])
+        #expect(selection(preferred: joeld, offered: shown) == .claude)
+        #expect(selection(preferred: elara, offered: shown) == elara, "a valid selection is kept")
+    }
+
+    @Test func degradesRatherThanCrashingWhenNothingIsEnabled() {
+        let none = offered(capable: capable, enabled: [])
+        #expect(none.isEmpty)
+        #expect(selection(preferred: elara, offered: none) == .claude)
+    }
+}
