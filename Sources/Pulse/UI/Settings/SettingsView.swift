@@ -81,6 +81,25 @@ struct SettingsView: View {
                     : "One provider at a time, switched with the tab bar (⌘1…⌘4, arrow keys).")
                     .font(Typo.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle(isOn: $settings.showSystemStats) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Show this Mac's stats")
+                        Text("A sidebar left of the providers with CPU, memory pressure, swap and free disk — what decides whether the machine can take another local agent, next to what decides whether the account can.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Toggle(isOn: $settings.showSystemProcesses) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("List top processes")
+                        Text("The four heaviest processes by CPU, read from `ps` while the panel is open.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!settings.showSystemStats)
             }
 
             Section("Menu Bar") {

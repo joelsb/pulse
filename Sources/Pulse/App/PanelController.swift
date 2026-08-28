@@ -124,7 +124,18 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     /// `--pin-panel` keeps the panel up despite focus loss / outside clicks —
     /// used only for automated screenshot verification.
-    private let isPinnedForDebug = ProcessInfo.processInfo.arguments.contains("--pin-panel")
+    ///
+    /// It disables EVERY dismissal path at once (ESC, click-outside, focus
+    /// loss, and the status-item toggle), which to a user is indistinguishable
+    /// from the app having hung: the panel is stuck open and clicking the menu
+    /// bar icon does nothing. That has been mistaken for a bug twice, so the
+    /// flag now announces itself two ways that cannot be missed — a log line,
+    /// and the ⚑ prefix on the status item (see StatusItemController) — rather
+    /// than trusting whoever launched the app to remember they passed it.
+    private let isPinnedForDebug = PanelController.isPinnedForDebugLaunch
+
+    /// Static so the status item can read it without owning a controller.
+    static let isPinnedForDebugLaunch = ProcessInfo.processInfo.arguments.contains("--pin-panel")
 
     init(environment: AppEnvironment) {
         self.environment = environment

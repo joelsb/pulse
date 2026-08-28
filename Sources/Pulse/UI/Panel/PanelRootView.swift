@@ -43,12 +43,23 @@ struct PanelRootView: View {
     /// Providers actually drawn side by side, clamped to what the screen can
     /// hold at one full-width column each.
     private var columns: [ProviderID] {
-        let usable = state.maxPanelWidth - 2 * Layout.panelPadding + Layout.cardGap
+        let usable = state.maxPanelWidth - 2 * Layout.panelPadding - systemWidth + Layout.cardGap
         let fits = max(Int(usable / (columnWidth + Layout.cardGap)), 1)
         return Array(tabs.prefix(fits))
     }
 
     private var isColumns: Bool { settings.panelLayout == .columns && tabs.count > 1 }
+
+    /// Whether the machine-stats sidebar is drawn. It sits left of the
+    /// providers in both layouts - with a single provider tab that means left
+    /// of that one tab, which is exactly the arrangement that makes it useful
+    /// while an agent is running.
+    private var showsSystem: Bool { settings.showSystemStats }
+
+    /// Horizontal budget the sidebar takes out of the panel, gap included.
+    private var systemWidth: CGFloat {
+        showsSystem ? Layout.systemColumnWidth + Layout.cardGap : 0
+    }
 
     private var selection: ProviderID {
         tabs.contains(settings.selectedTab) ? settings.selectedTab : tabs[0]
@@ -75,11 +86,12 @@ struct PanelRootView: View {
         }
     }
 
-    /// Panel width: one column, or N columns plus the gaps between them.
+    /// Panel width: the optional stats sidebar, plus one column, or N columns
+    /// and the gaps between them.
     private var contentWidth: CGFloat {
-        guard isColumns else { return Layout.panelWidth }
+        guard isColumns else { return Layout.panelWidth + systemWidth }
         let count = CGFloat(columns.count)
-        return count * columnWidth + (count - 1) * Layout.cardGap + 2 * Layout.panelPadding
+        return count * columnWidth + (count - 1) * Layout.cardGap + 2 * Layout.panelPadding + systemWidth
     }
 
     /// Origin-aware enter/exit: grows out of the status item (scale anchored
@@ -93,19 +105,33 @@ struct PanelRootView: View {
 
     private var content: some View {
         VStack(spacing: Layout.cardGap) {
-            if isColumns {
-                columnArea
-            } else {
-                ProviderTabBar(
-                    providers: tabs,
-                    names: { environment.descriptor(for: $0).name },
-                    selection: Binding(
-                        get: { selection },
-                        set: { select($0, keyboard: false) }
+            HStack(alignment: .top, spacing: Layout.cardGap) {
+                if showsSystem {
+                    SystemColumn(
+                        monitor: environment.system,
+                        showProcesses: settings.showSystemProcesses
                     )
-                )
+                }
 
-                cardArea
+                if isColumns {
+                    columnArea
+                } else {
+                    VStack(spacing: Layout.cardGap) {
+                        ProviderTabBar(
+                            providers: tabs,
+                            names: { environment.descriptor(for: $0).name },
+                            selection: Binding(
+                                get: { selection },
+                                set: { select($0, keyboard: false) }
+                            )
+                        )
+
+                        cardArea
+
+                        Spacer(minLength: 0)
+                    }
+                    .frame(width: columnWidth)
+                }
             }
 
             PanelFooter(store: store) {

@@ -83,6 +83,8 @@ final class SettingsStore {
         static let gaugeDirection = "gaugeDirection"
         static let showPaceMarker = "showPaceMarker"
         static let panelLayout = "panelLayout"
+        static let showSystemStats = "showSystemStats"
+        static let showSystemProcesses = "showSystemProcesses"
     }
 
     private let defaults: UserDefaults
@@ -127,6 +129,21 @@ final class SettingsStore {
     /// provider, so the controller derives the window width from this.
     var panelLayout: PanelLayout {
         didSet { defaults.set(panelLayout.rawValue, forKey: Key.panelLayout) }
+    }
+
+    /// Whether the panel carries the machine-stats sidebar on its left. It is
+    /// the only part of the panel that is not about a provider account, so it
+    /// is separately switchable: a user who never runs agents locally has no
+    /// use for it and pays a column of width for it.
+    var showSystemStats: Bool {
+        didSet { defaults.set(showSystemStats, forKey: Key.showSystemStats) }
+    }
+
+    /// Whether the sidebar lists the top CPU processes. Separate from the
+    /// sidebar switch because this is the one part that spawns `ps` on every
+    /// tick and shows process names, so it can be turned off on its own.
+    var showSystemProcesses: Bool {
+        didSet { defaults.set(showSystemProcesses, forKey: Key.showSystemProcesses) }
     }
 
     /// Last selected provider tab, restored when the panel reopens.
@@ -204,6 +221,11 @@ final class SettingsStore {
         // showing all of them beats three clicks showing one each.
         panelLayout = defaults.string(forKey: Key.panelLayout)
             .flatMap(PanelLayout.init(rawValue:)) ?? .columns
+
+        // Default on: the sidebar is the reason the panel is useful while an
+        // agent is running locally, and it is invisible unless the panel is open.
+        showSystemStats = (defaults.object(forKey: Key.showSystemStats) as? Bool) ?? true
+        showSystemProcesses = (defaults.object(forKey: Key.showSystemProcesses) as? Bool) ?? true
 
         selectedTab = defaults.string(forKey: Key.selectedTab)
             .flatMap(ProviderID.init(rawValue:)) ?? .claude
