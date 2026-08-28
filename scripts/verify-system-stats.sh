@@ -137,6 +137,22 @@ run_case() {
         'processes.sorted { metric($0) > metric($1) }' \
         'processes.sorted { metric($0) < metric($1) }' 
       ;;
+    clusters-swapped)
+      # Defect: P and E index ranges exchanged. Reports the fast cores idle
+      # while a build saturates them, and the slow ones pinned. Every value
+      # stays inside 0-100, so only a check that CREATES a known load catches it.
+      swap "$dir/src/SystemMonitor.swift" \
+        'performanceIndices: efficiencyCount..<total,
+                efficiencyIndices: 0..<efficiencyCount,' \
+        'performanceIndices: 0..<performanceCount,
+                efficiencyIndices: performanceCount..<total,'
+      ;;
+    cluster-busy-counts-idle)
+      # Defect: idle ticks counted as busy, so both clusters read ~100% forever.
+      swap "$dir/src/SystemMonitor.swift" \
+        'busyTicks += deltaTotal - idle' \
+        'busyTicks += deltaTotal'
+      ;;
     purgeable-always-zero)
       # Defect: the second capacity key is never read, so "reclaimable cache"
       # reports a constant 0 B. Looks like a Mac with nothing to reclaim, which
@@ -223,6 +239,8 @@ DEFECTS=(
   compact-bytes-has-space
   memory-card-resorts-cpu-list
   ranking-ascending
+  clusters-swapped
+  cluster-busy-counts-idle
   purgeable-always-zero
   purgeable-subtraction-flipped
   memory-history-in-bytes

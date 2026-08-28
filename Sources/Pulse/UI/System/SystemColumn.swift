@@ -88,7 +88,15 @@ private struct SystemColumnHeader: View {
         if sample.memoryPressure == .warning || sample.thermal == .serious || sample.diskUtilization >= 90 {
             return PulseColor.warn
         }
-        return PulseColor.threshold(utilization: max(sample.cpuTotal, sample.loadUtilization))
+        return PulseColor.threshold(utilization: max(sample.cpuTotal, sample.loadUtilization, performancePressure))
+    }
+
+    /// Saturated Performance cores count as CPU pressure even when the
+    /// aggregate is comfortable: the E-cores being free does not help a build
+    /// that is waiting on a fast core.
+    private var performancePressure: Double {
+        guard let performance = sample.cpuPerformance, sample.hasCoreSplit else { return 0 }
+        return performance
     }
 
     private var thermalColor: Color {
@@ -138,6 +146,26 @@ private struct CPUCard: View {
                 Sparkline(values: history, color: PulseColor.threshold(utilization: sample.cpuTotal))
                     .frame(height: 26)
 
+                // The P/E split, when the machine has one. The aggregate hides
+                // the case that actually matters: on a 4P+6E Mac, a build
+                // pegging all four P-cores reads as ~40% overall, which looks
+                // like headroom and is not.
+                if sample.hasCoreSplit {
+                    VStack(spacing: 4) {
+                        clusterRow(
+                            label: "P",
+                            count: sample.performanceCoreCount,
+                            busy: sample.cpuPerformance
+                        )
+                        clusterRow(
+                            label: "E",
+                            count: sample.efficiencyCoreCount,
+                            busy: sample.cpuEfficiency
+                        )
+                    }
+                    .help("Performance and Efficiency cores, measured separately. The combined percentage can look comfortable while every fast core is already taken, which is what decides whether another agent gets real cycles.")
+                }
+
                 HStack(spacing: 4) {
                     Text("usr \(Formatters.percent(sample.cpuUser))")
                     Text("·")
@@ -156,6 +184,33 @@ private struct CPUCard: View {
 
     private var loadColor: Color {
         PulseColor.threshold(utilization: sample.loadUtilization)
+    }
+
+    /// One cluster: "P 4c ▓▓▓▓░ 92%". Compact enough that two of them cost less
+    /// vertical space than one more card would.
+    @ViewBuilder
+    private func clusterRow(label: String, count: Int, busy: Double?) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(Typo.captionValue)
+                .foregroundStyle(.secondary)
+                .frame(width: 9, alignment: .leading)
+            Text("\(count)c")
+                .font(Typo.caption)
+                .foregroundStyle(.tertiary)
+                .frame(width: 18, alignment: .leading)
+
+            GaugeBar(utilization: busy ?? 0, direction: .used)
+
+            // An em dash rather than 0% for the first tick, when there is no
+            // delta yet: showing 0% would claim the cluster is idle.
+            Text(busy.map(Formatters.percent) ?? "—")
+                .font(Typo.captionValue)
+                .foregroundStyle(busy.map { PulseColor.threshold(utilization: $0) } ?? .secondary)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(width: 32, alignment: .trailing)
+        }
     }
 
     private var loadText: String {

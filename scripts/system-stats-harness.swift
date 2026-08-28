@@ -386,6 +386,111 @@ check(
     "top processes are sorted by CPU descending"
 )
 
+// MARK: - 4a. Performance / Efficiency core split
+//
+// The point of the split is the case the aggregate hides, so it is tested by
+// CREATING that case: spin exactly as many userInteractive threads as there are
+// P-cores. macOS prefers those cores for that QoS, so the P figure must climb
+// well above the E figure and above the aggregate. A build that mixed up the
+// two clusters reports the mirror image and passes any check that only looks at
+// ranges.
+
+let topology = SystemSampler.CoreTopology.detect()
+print("topology: split=\(topology.isSplit) P=\(topology.performanceIndices) E=\(topology.efficiencyIndices)")
+
+if topology.isSplit {
+    // Ranges must tile the machine exactly once: no overlap, no gap. An
+    // off-by-one here silently attributes one core to the wrong cluster.
+    let cores = ProcessInfo.processInfo.activeProcessorCount
+    checkEqual(
+        topology.performanceIndices.count + topology.efficiencyIndices.count,
+        cores,
+        "P and E ranges cover every core"
+    )
+    check(
+        Set(topology.performanceIndices).isDisjoint(with: Set(topology.efficiencyIndices)),
+        "P and E ranges do not overlap"
+    )
+    check(topology.performanceIndices.count > 0, "at least one performance core")
+    check(topology.efficiencyIndices.count > 0, "at least one efficiency core")
+
+    let splitBox = Box()
+    let splitDone = DispatchSemaphore(value: 0)
+    let pCount = topology.performanceIndices.count
+
+    Thread.detachNewThread {
+        let inner = DispatchSemaphore(value: 0)
+        Task.detached {
+            let sampler = SystemSampler()
+            // Baseline for the per-core deltas.
+            _ = await sampler.sample(includeProcesses: false)
+
+            // Load ONLY as many threads as there are P-cores, at the QoS macOS
+            // schedules onto them.
+            let group = DispatchGroup()
+            for _ in 0..<pCount {
+                DispatchQueue.global(qos: .userInteractive).async(group: group) {
+                    let deadline = Date().addingTimeInterval(2.5)
+                    var spin = 0.0
+                    while Date() < deadline { spin += Double.random(in: 0...1) }
+                    if spin < 0 { print("unreachable") }
+                }
+            }
+            // Sample WHILE the load runs, not after it: reading afterwards
+            // measures an idle machine and proves nothing.
+            try? await Task.sleep(for: .milliseconds(1500))
+            splitBox.second = await sampler.sample(includeProcesses: false)
+            // DispatchGroup.wait() is unavailable in an async context, and the
+            // spin threads finish on their own deadline anyway; the sample is
+            // already taken, so there is nothing left to join.
+            inner.signal()
+        }
+        if inner.wait(timeout: .now() + 40) == .timedOut {
+            print("FAIL: core-split sampling did not complete")
+            exit(1)
+        }
+        splitDone.signal()
+    }
+    if splitDone.wait(timeout: .now() + 50) == .timedOut {
+        print("FAIL: core-split thread never finished")
+        exit(1)
+    }
+
+    let loaded = splitBox.second
+    check(loaded.hasCoreSplit, "sample reports a core split on this machine")
+    checkEqual(loaded.performanceCoreCount, topology.performanceIndices.count, "P core count on the sample")
+    checkEqual(loaded.efficiencyCoreCount, topology.efficiencyIndices.count, "E core count on the sample")
+
+    if let performance = loaded.cpuPerformance, let efficiency = loaded.cpuEfficiency {
+        print(String(format: "under %d interactive threads: P %.1f%%  E %.1f%%  aggregate %.1f%%",
+                     pCount, performance, efficiency, loaded.cpuTotal))
+
+        check(performance >= 0 && performance <= 100, "P percentage in range")
+        check(efficiency >= 0 && efficiency <= 100, "E percentage in range")
+
+        // THE assertion: interactive load lands on the performance cluster.
+        // Reversed cluster mapping fails here and nowhere else.
+        check(
+            performance > efficiency,
+            String(format: "interactive load lands on P, not E (P %.1f%% vs E %.1f%%)", performance, efficiency)
+        )
+        // And the whole reason the split exists: the P figure exceeds the
+        // aggregate, i.e. the combined number understates the real pressure.
+        check(
+            performance > loaded.cpuTotal,
+            String(format: "P pressure exceeds the aggregate that hides it (P %.1f%% vs total %.1f%%)", performance, loaded.cpuTotal)
+        )
+        check(
+            performance > 50,
+            String(format: "saturating the P cores registers as high P usage (got %.1f%%)", performance)
+        )
+    } else {
+        failures.append("core split produced no percentages under load")
+    }
+} else {
+    print("note: no P/E split on this machine, split assertions skipped")
+}
+
 // MARK: - 4b. History series
 
 // SystemMonitor is @MainActor, and top-level code in main.swift runs on the

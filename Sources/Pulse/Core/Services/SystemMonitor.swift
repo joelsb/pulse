@@ -15,6 +15,22 @@ struct SystemSample: Sendable, Equatable {
     var cpuSystem: Double = 0
     var coreCount: Int = 1
 
+    /// Busy percentage of the Performance cores only, or nil on a machine with
+    /// no such split (Intel, or a future topology we cannot classify).
+    ///
+    /// This is the number the aggregate hides. On an M4 (4 P + 6 E) a build
+    /// that pegs all four P-cores while the E-cores idle reads as ~40% overall,
+    /// which looks like plenty of headroom and is not: the cores that finish
+    /// work fast are already gone.
+    var cpuPerformance: Double?
+    /// Busy percentage of the Efficiency cores only.
+    var cpuEfficiency: Double?
+    var performanceCoreCount: Int = 0
+    var efficiencyCoreCount: Int = 0
+
+    /// True when the P/E split is real and worth showing.
+    var hasCoreSplit: Bool { cpuPerformance != nil && performanceCoreCount > 0 }
+
     /// Unix load averages. Read against `coreCount`: load == cores means the
     /// run queue is exactly saturated, which is the number that actually
     /// predicts whether one more local agent will thrash.
@@ -120,6 +136,80 @@ struct ProcessSample: Sendable, Equatable, Identifiable {
 /// readings, so the previous tick's ticks are state that must not be raced.
 actor SystemSampler {
     private var previousTicks: CPUTicks?
+    private var previousCoreTicks: [CPUTicks]?
+
+    /// Cached core topology. Fixed for the life of the process, and two sysctl
+    /// calls per tick is pure waste.
+    private lazy var topology = CoreTopology.detect()
+
+    /// How the machine's cores split into Performance and Efficiency clusters,
+    /// and which indices in `host_processor_info`'s array belong to each.
+    ///
+    /// MEASURED, NOT ASSUMED: on this M4, `hw.perflevel0` is named
+    /// "Performance" with 4 cores and `hw.perflevel1` is "Efficiency" with 6,
+    /// but `host_processor_info` lists the EFFICIENCY cores first - indices 0-5
+    /// are the E-cores and 6-9 are the P-cores. Verified in both directions by
+    /// pinning spin loops: `.background` QoS work landed on 0-3 (E-cores, where
+    /// macOS confines it) and `.userInteractive` work landed on 6-9. Assuming
+    /// perflevel0 maps to the first indices gives a plausible, wrong answer
+    /// that reports the P-cores idle while a build saturates them.
+    ///
+    /// Because that ordering is undocumented, the split is derived from the
+    /// per-level core COUNTS and the observed convention, and the whole feature
+    /// degrades to nil rather than guessing when the counts do not add up.
+    struct CoreTopology {
+        var performanceIndices: Range<Int> = 0..<0
+        var efficiencyIndices: Range<Int> = 0..<0
+        var isSplit: Bool = false
+
+        static func detect() -> CoreTopology {
+            let total = ProcessInfo.processInfo.activeProcessorCount
+            guard sysctlInt("hw.nperflevels") == 2,
+                  let first = sysctlInt("hw.perflevel0.logicalcpu"),
+                  let second = sysctlInt("hw.perflevel1.logicalcpu"),
+                  first > 0, second > 0, first + second == total
+            else {
+                return CoreTopology()
+            }
+
+            // perflevel0 is the FASTER cluster (named "Performance" here), but
+            // it occupies the LAST indices in the processor-info array. Read the
+            // names rather than trusting the order, so a future Apple Silicon
+            // variant with the naming reversed is classified correctly instead
+            // of inverted.
+            let firstIsPerformance = sysctlString("hw.perflevel0.name")?
+                .localizedCaseInsensitiveContains("performance") ?? true
+
+            let performanceCount = firstIsPerformance ? first : second
+            let efficiencyCount = firstIsPerformance ? second : first
+
+            // Efficiency cluster occupies the low indices, performance the high
+            // ones - the ordering verified above.
+            return CoreTopology(
+                performanceIndices: efficiencyCount..<total,
+                efficiencyIndices: 0..<efficiencyCount,
+                isSplit: performanceCount > 0 && efficiencyCount > 0
+            )
+        }
+
+        static func sysctlInt(_ name: String) -> Int? {
+            var value: Int32 = 0
+            var size = MemoryLayout<Int32>.size
+            guard sysctlbyname(name, &value, &size, nil, 0) == 0 else { return nil }
+            return Int(value)
+        }
+
+        static func sysctlString(_ name: String) -> String? {
+            var size = 0
+            guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+            var buffer = [UInt8](repeating: 0, count: size)
+            guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
+            // sysctl returns a NUL-terminated C string; the terminator has to
+            // go before decoding or it lands inside the Swift String.
+            let bytes = buffer.prefix(while: { $0 != 0 })
+            return String(decoding: bytes, as: UTF8.self)
+        }
+    }
 
     private struct CPUTicks {
         var user: UInt64
@@ -156,6 +246,13 @@ actor SystemSampler {
     // MARK: - CPU
 
     private func applyCPU(to sample: inout SystemSample) {
+        // The per-core split MUST be attempted before the aggregate's
+        // early return below. It keeps its own baseline, and leaving it after
+        // that `guard` meant the first call never captured one, so the second
+        // call still had nothing to diff against and the split silently never
+        // appeared - the whole feature reduced to a permanent nil.
+        applyCoreSplit(to: &sample)
+
         guard let ticks = Self.readCPUTicks() else { return }
         defer { previousTicks = ticks }
 
@@ -173,6 +270,69 @@ actor SystemSampler {
         sample.cpuUser = min(100, user / deltaTotal * 100)
         sample.cpuSystem = min(100, system / deltaTotal * 100)
         sample.cpuTotal = min(100, sample.cpuUser + sample.cpuSystem)
+    }
+
+    /// Per-cluster busy percentages, so a saturated Performance cluster is
+    /// visible behind a comfortable-looking aggregate.
+    private func applyCoreSplit(to sample: inout SystemSample) {
+        guard topology.isSplit else { return }
+        sample.performanceCoreCount = topology.performanceIndices.count
+        sample.efficiencyCoreCount = topology.efficiencyIndices.count
+
+        guard let current = Self.readPerCoreTicks() else { return }
+        defer { previousCoreTicks = current }
+        guard let previous = previousCoreTicks,
+              previous.count == current.count,
+              // A core coming online (or a topology change) invalidates the
+              // index mapping, so the reading is skipped rather than attributed
+              // to the wrong cluster.
+              current.count == topology.performanceIndices.count + topology.efficiencyIndices.count
+        else { return }
+
+        func busy(_ indices: Range<Int>) -> Double? {
+            var busyTicks = 0.0
+            var totalTicks = 0.0
+            for index in indices where index < current.count {
+                let deltaTotal = Double(current[index].total &- previous[index].total)
+                guard deltaTotal > 0 else { continue }
+                let idle = Double(current[index].idle &- previous[index].idle)
+                busyTicks += deltaTotal - idle
+                totalTicks += deltaTotal
+            }
+            guard totalTicks > 0 else { return nil }
+            return min(100, max(0, busyTicks / totalTicks * 100))
+        }
+
+        sample.cpuPerformance = busy(topology.performanceIndices)
+        sample.cpuEfficiency = busy(topology.efficiencyIndices)
+    }
+
+    /// One `CPUTicks` per logical core. The array is kernel-allocated and MUST
+    /// be handed back with `vm_deallocate`, or the app leaks a page per tick.
+    private static func readPerCoreTicks() -> [CPUTicks]? {
+        var count: natural_t = 0
+        var info: processor_info_array_t?
+        var infoCount: mach_msg_type_number_t = 0
+        guard host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &count, &info, &infoCount) == KERN_SUCCESS,
+              let info
+        else { return nil }
+        defer {
+            vm_deallocate(
+                mach_task_self_,
+                vm_address_t(UInt(bitPattern: info)),
+                vm_size_t(infoCount) * vm_size_t(MemoryLayout<integer_t>.stride)
+            )
+        }
+
+        let stride = Int(CPU_STATE_MAX)
+        return (0..<Int(count)).map { index in
+            CPUTicks(
+                user: UInt64(info[index * stride + Int(CPU_STATE_USER)]),
+                system: UInt64(info[index * stride + Int(CPU_STATE_SYSTEM)]),
+                idle: UInt64(info[index * stride + Int(CPU_STATE_IDLE)]),
+                nice: UInt64(info[index * stride + Int(CPU_STATE_NICE)])
+            )
+        }
     }
 
     private static func readCPUTicks() -> CPUTicks? {
