@@ -87,6 +87,20 @@ struct SystemMonitorTests {
 
     // MARK: - Display helpers
 
+    @Test("Process memory is the physical footprint, not ps RSS")
+    func footprintNotRSS() {
+        // Live check, because the two metrics are both plausible byte counts and
+        // only an independent reading distinguishes them. This process always
+        // exists, so nil here means the call convention broke.
+        let mine = SystemSampler.footprintBytes(ProcessInfo.processInfo.processIdentifier)
+        #expect(mine != nil)
+        #expect((mine ?? 0) > 0)
+
+        // pid 0 (the kernel) never exposes a footprint, so a nil return must be
+        // possible - a version that always succeeds is not reading anything.
+        #expect(SystemSampler.footprintBytes(0) == nil)
+    }
+
     @Test("Reverse-DNS process names keep their informative tail")
     func processDisplayNames() {
         // Middle-truncating this rendered "com....ntent" on screen, which names

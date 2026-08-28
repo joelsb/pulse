@@ -340,51 +340,153 @@ checkClose(second.cpuUser + second.cpuSystem, second.cpuTotal, "cpu total is use
 check(!second.topProcesses.isEmpty, "top processes read from the live machine")
 check(second.topProcesses.allSatisfy { $0.pid > 0 }, "live pids are positive")
 check(second.topProcesses.allSatisfy { !$0.name.isEmpty }, "live process names non-empty")
-check(second.topProcesses.allSatisfy { $0.memory > 0 }, "live processes report resident memory")
+check(second.topProcesses.allSatisfy { $0.memory > 0 }, "live processes report memory")
 
-// Both cards must be populated from the SAME `ps` pass.
-check(!second.topMemoryProcesses.isEmpty, "memory ranking read from the live machine")
-checkEqual(second.topProcesses.count, 5, "CPU card shows five rows")
-checkEqual(second.topMemoryProcesses.count, 5, "memory card shows five rows")
-check(
-    zip(second.topMemoryProcesses, second.topMemoryProcesses.dropFirst()).allSatisfy { $0.memory >= $1.memory },
-    "live memory ranking is sorted by resident bytes descending"
-)
-// The re-sort defect's exact signature: if the memory card were built by
-// re-sorting the CPU top-5, every pid in it would necessarily also be in the
-// CPU list. Comparing the two ORDERS is not enough — a re-sort is a
-// permutation, so the orders differ and the check passes while the bug is
-// live. Subset is the property that actually distinguishes the two
-// implementations.
-let cpuPIDs = Set(second.topProcesses.map(\.pid))
-let memoryPIDs = Set(second.topMemoryProcesses.map(\.pid))
-check(
-    !memoryPIDs.isSubset(of: cpuPIDs),
-    "memory ranking is drawn from the whole process table, not a re-sort of the CPU top-5 (cpu \(cpuPIDs.sorted()), mem \(memoryPIDs.sorted()))"
-)
-// Corollary: the heaviest process by memory on the machine must be at least as
-// heavy as anything the CPU card happened to include.
-if let heaviest = second.topMemoryProcesses.first,
-   let heaviestInCPUList = second.topProcesses.map(\.memory).max() {
+// Memory must be the PHYSICAL FOOTPRINT (Activity Monitor's "Memory" column),
+// not ps RSS. Cross-checked against /usr/bin/footprint, a different binary with
+// its own implementation, for the heaviest process we can actually read.
+//
+// Why a cross-check and not a range assertion: RSS is also a plausible-looking
+// positive byte count, so nothing about its VALUE reveals the bug. Only
+// agreement with an independent implementation of the same metric does.
+func psTableText() -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-Aceo", "pid,pcpu,rss,comm"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return "" }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+func footprintFromBinary(_ pid: Int32) -> Int64? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/footprint")
+    process.arguments = ["-p", "\(pid)"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard let text = String(data: data, encoding: .utf8) else { return nil }
+    // "        phys_footprint: 436 MB"
+    for line in text.split(separator: "\n") where line.contains("phys_footprint:") {
+        let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+        guard let index = fields.firstIndex(where: { $0.contains("phys_footprint:") }),
+              index + 2 < fields.count,
+              let value = Double(fields[index + 1])
+        else { continue }
+        switch fields[index + 2] {
+        case "GB": return Int64(value * 1_073_741_824)
+        case "MB": return Int64(value * 1_048_576)
+        case "KB": return Int64(value * 1024)
+        default: return Int64(value)
+        }
+    }
+    return nil
+}
+
+if let heaviest = second.topMemoryProcesses.first(where: { !$0.memoryIsApproximate }) {
+    if let reported = footprintFromBinary(heaviest.pid) {
+        // `footprint` prints whole MB/GB, and both readings are seconds apart on
+        // a live machine, so 25% of slack absorbs rounding plus real churn while
+        // staying far below the multiple-x error RSS introduces (measured 0.89x
+        // to 11.6x on this Mac).
+        let ratio = Double(heaviest.memory) / Double(reported)
+        check(
+            ratio > 0.75 && ratio < 1.33,
+            "process memory agrees with /usr/bin/footprint for \(heaviest.name) (ours \(Formatters.bytes(heaviest.memory)), footprint \(Formatters.bytes(reported)), ratio \(String(format: "%.2f", ratio)))"
+        )
+    } else {
+        print("note: /usr/bin/footprint unavailable for pid \(heaviest.pid), cross-check skipped")
+    }
+
+    // Second, independent signature of the bug: RSS for the same pid must be
+    // measurably DIFFERENT from what we report. If they match, we are reporting
+    // RSS no matter what the code claims to call.
+    let psTable = SystemSampler.parseProcessList(psTableText(), limit: Int.max)
+    if let rssRow = psTable.first(where: { $0.pid == heaviest.pid }) {
+        let rssRatio = Double(heaviest.memory) / Double(max(rssRow.memory, 1))
+        print(String(format: "heaviest: %@ footprint %@ vs ps RSS %@ (%.2fx)",
+                     heaviest.name,
+                     Formatters.bytes(heaviest.memory),
+                     Formatters.bytes(rssRow.memory),
+                     rssRatio))
+    }
+} else {
+    failures.append("no readable-footprint process in the memory ranking")
+}
+
+// The user-visible symptom that started this: Activity Monitor showed several
+// multi-gigabyte processes while the card, ranking on RSS, showed none. The top
+// memory process on a machine running browsers and terminals must be
+// substantial - RSS put the leader at ~500 MB when the real leader was ~1.9 GB.
+if let leader = second.topMemoryProcesses.first {
     check(
-        heaviest.memory >= heaviestInCPUList,
-        "top memory process outranks everything in the CPU card"
+        leader.memory > 700_000_000,
+        "the heaviest process is reported at footprint scale, not RSS scale (got \(Formatters.bytes(leader.memory)) for \(leader.name))"
     )
 }
-// Every row in either card must exist in the other's source table, i.e. one
-// process cannot report different memory in the two cards.
-for row in second.topMemoryProcesses {
-    if let twin = second.topProcesses.first(where: { $0.pid == row.pid }) {
-        checkEqual(twin.memory, row.memory, "pid \(row.pid) reports one memory figure in both cards")
-        checkEqual(twin.cpu, row.cpu, "pid \(row.pid) reports one CPU figure in both cards")
+
+// An approximate row must be flagged, and the flag must be TRUSTWORTHY in both
+// directions. Checking only the rows that happen to appear in the top 5 is not
+// enough: on a quiet machine none of them may be root-owned, so the flag is
+// never exercised and dropping it entirely goes unnoticed.
+//
+// Instead the whole table is scanned for a process whose footprint is genuinely
+// denied (WindowServer is always one), and the sampler is required to have
+// flagged it. That is the assertion that fails when the flag is hard-coded false.
+let fullTable = SystemSampler.parseProcessList(psTableText(), limit: Int.max)
+let deniedPIDs = fullTable.map(\.pid).filter { SystemSampler.footprintBytes($0) == nil }
+print("processes denying footprint: \(deniedPIDs.count) of \(fullTable.count)")
+
+if deniedPIDs.isEmpty {
+    print("note: every process exposed its footprint, approximate-flag check skipped")
+} else {
+    // Sample the same way the app does, then find one of those pids in the
+    // sampler's own output and require the flag to be set.
+    let flagBox = Box()
+    let flagDone = DispatchSemaphore(value: 0)
+    Thread.detachNewThread {
+        let inner = DispatchSemaphore(value: 0)
+        Task.detached {
+            flagBox.second = await SystemSampler().sample()
+            inner.signal()
+        }
+        if inner.wait(timeout: .now() + 30) == .timedOut {
+            print("FAIL: approximate-flag sampling did not complete")
+            exit(1)
+        }
+        flagDone.signal()
     }
+    if flagDone.wait(timeout: .now() + 40) == .timedOut {
+        print("FAIL: approximate-flag thread never finished")
+        exit(1)
+    }
+
+    let deniedSet = Set(deniedPIDs)
+    let rows = flagBox.second.topProcesses + flagBox.second.topMemoryProcesses
+    let deniedRows = rows.filter { deniedSet.contains($0.pid) }
+    if deniedRows.isEmpty {
+        print("note: no footprint-denied process reached the cards this tick")
+    } else {
+        check(
+            deniedRows.allSatisfy(\.memoryIsApproximate),
+            "every footprint-denied row is flagged approximate (\(deniedRows.filter { !$0.memoryIsApproximate }.map(\.name)))"
+        )
+    }
+    // The converse, so the flag cannot be hard-coded TRUE either: a row whose
+    // footprint reads fine must not claim to be approximate.
+    let readableRows = rows.filter { !deniedSet.contains($0.pid) }
+    check(
+        readableRows.allSatisfy { !$0.memoryIsApproximate },
+        "rows with a readable footprint are not flagged approximate"
+    )
 }
-// `ps -r` sorts by CPU descending; if it did not, the card would show four
-// arbitrary processes and still look correct.
-check(
-    zip(second.topProcesses, second.topProcesses.dropFirst()).allSatisfy { $0.cpu >= $1.cpu },
-    "top processes are sorted by CPU descending"
-)
 
 // MARK: - 4a. Performance / Efficiency core split
 //

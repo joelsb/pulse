@@ -67,6 +67,24 @@ run_case() {
 
   case "$defect" in
     "") ;;
+    memory-uses-rss-not-footprint)
+      # Defect: the footprint lookup is skipped and ps RSS is reported instead.
+      # THE bug Joel found on screen: RSS understates by 0.89x to 11.6x
+      # depending on the process, so multi-gigabyte apps vanish from the card
+      # and the ranking silently comes out in the wrong order. Every value is
+      # still a plausible positive byte count, so only agreement with an
+      # independent implementation catches it.
+      swap "$dir/src/SystemMonitor.swift" \
+        'if let footprint = Self.footprintBytes(row.pid) {' \
+        'if let footprint = Optional<Int64>.none {'
+      ;;
+    approximate-never-flagged)
+      # Defect: a denied footprint keeps RSS but is not marked, so two different
+      # measurements sit in one ranking with nothing telling them apart.
+      swap "$dir/src/SystemMonitor.swift" \
+        'row.memoryIsApproximate = true' \
+        'row.memoryIsApproximate = false'
+      ;;
     rss-as-bytes)
       # Defect: treat `ps` RSS as bytes. Renders a plausible "1 MB" for a
       # process holding a gigabyte — wrong by 1024x and invisible on screen.
@@ -226,6 +244,8 @@ fi
 echo
 echo "=== planted defects (each MUST be caught) ==="
 DEFECTS=(
+  memory-uses-rss-not-footprint
+  approximate-never-flagged
   rss-as-bytes
   memory-total-minus-free
   disk-shows-free-not-used

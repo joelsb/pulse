@@ -340,9 +340,14 @@ private struct StorageCard: View {
 /// the two rankings answer different questions: what is burning the machine
 /// *now* versus what is holding the RAM a new agent would need.
 private struct TopProcessesCard: View {
-    /// Which column is the ranking, and therefore which one is emphasised. The
-    /// other metric still shows, dimmed, so a row is never missing the number
-    /// the neighbouring card ranks by.
+    /// Which metric this card ranks by, and the ONLY number it shows.
+    ///
+    /// The secondary metric was shown dimmed beside it at first, as context.
+    /// That was wrong: Activity Monitor's CPU tab has no Memory column either,
+    /// the neighbouring card already carries the other ranking, and in a 210pt
+    /// column the third value is paid for by truncating the process name -
+    /// which is the only thing identifying the row. Both figures are still in
+    /// the tooltip.
     enum Metric { case cpu, memory }
 
     let title: String
@@ -377,45 +382,38 @@ private struct TopProcessesCard: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                // The name is the only field that identifies the row, so it
-                // wins the space fight with the numeric columns rather than
-                // being squeezed into "com....ntent".
+                // The name identifies the row, so it takes the space the
+                // second metric used to occupy.
                 .layoutPriority(1)
 
             Spacer(minLength: 4)
-
-            // Secondary metric first, dimmed: it is context for the ranked
-            // number, and putting it last would compete with the value the
-            // card is sorted by. Fixed width and no wrapping - a long process
-            // name otherwise squeezes this column until "15%" wraps to two
-            // lines and the row doubles in height.
-            Text(secondaryText(process))
-                .font(Typo.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize()
 
             Text(primaryText(process))
                 .font(Typo.captionValue)
                 .foregroundStyle(primaryColor(process))
                 .lineLimit(1)
                 .fixedSize()
-                .frame(width: 38, alignment: .trailing)
         }
-        .help("PID \(process.pid) · \(process.name) · \(Formatters.percent(process.cpu)) of one core · \(Formatters.bytes(process.memory)) resident")
+        .help(helpText(process))
+    }
+
+    /// Both figures live here, since the row itself now shows only the ranked
+    /// one. Names the measurement explicitly, because "memory" is ambiguous on
+    /// macOS and the two available numbers differ by up to 11x.
+    private func helpText(_ process: ProcessSample) -> String {
+        let memory = process.memoryIsApproximate
+            ? "\(Formatters.bytes(process.memory)) resident (footprint unavailable for this process)"
+            : "\(Formatters.bytes(process.memory)) memory footprint"
+        return "PID \(process.pid) · \(process.name) · \(Formatters.percent(process.cpu)) of one core · \(memory)"
     }
 
     private func primaryText(_ process: ProcessSample) -> String {
         switch metric {
         case .cpu: Formatters.percent(process.cpu)
-        case .memory: Formatters.compactBytes(process.memory)
-        }
-    }
-
-    private func secondaryText(_ process: ProcessSample) -> String {
-        switch metric {
-        case .cpu: Formatters.compactBytes(process.memory)
-        case .memory: Formatters.percent(process.cpu)
+        // A leading "~" for a row whose footprint the kernel refused, so an RSS
+        // fallback is never shown as if it were the same measurement.
+        case .memory:
+            (process.memoryIsApproximate ? "~" : "") + Formatters.compactBytes(process.memory)
         }
     }
 

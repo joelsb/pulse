@@ -101,7 +101,7 @@ struct SystemSample: Sendable, Equatable {
     }
 }
 
-/// One process row: pid, command, CPU share and resident bytes.
+/// One process row: pid, command, CPU share and memory.
 struct ProcessSample: Sendable, Equatable, Identifiable {
     var id: Int32 { pid }
     var pid: Int32
@@ -109,7 +109,21 @@ struct ProcessSample: Sendable, Equatable, Identifiable {
     /// Percent of ONE core, exactly as `ps` reports it, so a busy compiler can
     /// legitimately exceed 100.
     var cpu: Double
+    /// Memory as Activity Monitor's "Memory" column reports it: the process's
+    /// physical footprint.
+    ///
+    /// NOT resident set size. `ps` RSS is a different measurement and it
+    /// understates badly and inconsistently - measured on this Mac: Safari
+    /// 68 MB RSS against 800 MB footprint (11.6x), a Gmail tab 526 MB against
+    /// 1898 MB (3.6x), while jcode read 377 MB against 335 MB (0.89x). Because
+    /// the ratio varies per process, ranking on RSS does not merely scale the
+    /// numbers down, it puts the rows in the WRONG ORDER and hides the
+    /// multi-gigabyte processes entirely.
     var memory: Int64
+    /// True when the footprint could not be read (root-owned processes deny
+    /// `proc_pid_rusage`) and `memory` therefore carries RSS instead. Surfaced
+    /// so an approximate figure is never presented as an exact one.
+    var memoryIsApproximate: Bool = false
 
     /// Short label for a 210pt column.
     ///
@@ -466,7 +480,50 @@ actor SystemSampler {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         // No limit here: the table must be complete before it can be ranked, or
         // the memory card would only ever rank the first N lines `ps` printed.
-        return parseProcessList(text, limit: Int.max)
+        let rows = parseProcessList(text, limit: Int.max)
+        // RSS from `ps` is only the fallback; the real figure is each process's
+        // physical footprint, which has to be asked for per pid.
+        return rows.map { row in
+            var row = row
+            if let footprint = Self.footprintBytes(row.pid) {
+                row.memory = footprint
+            } else {
+                // Denied (root-owned process). Keep RSS so the row still has a
+                // number, but mark it, because RSS and footprint are different
+                // measurements and mixing them silently would make the ranking
+                // dishonest.
+                row.memoryIsApproximate = true
+            }
+            return row
+        }
+    }
+
+    /// A process's physical footprint in bytes: the number Activity Monitor
+    /// shows in its "Memory" column. nil when the kernel refuses (root-owned
+    /// processes).
+    ///
+    /// CALLING CONVENTION, because both natural spellings crash: the C signature
+    /// is `int proc_pid_rusage(int, int, rusage_info_t *)` where `rusage_info_t`
+    /// is itself `void *`, so the parameter is nominally `void **` - but real C
+    /// callers pass `(rusage_info_t *)&struct` and the kernel writes the STRUCT
+    /// at that address. There is no second indirection.
+    ///
+    /// So the pointer must be REINTERPRETED, not rebound.
+    /// `withMemoryRebound(to: rusage_info_t?.self)` traps at runtime, because
+    /// Swift checks that 464 bytes (`rusage_info_v6`) and 8 bytes (a pointer)
+    /// are layout-compatible and they are not. Allocating a raw buffer and
+    /// passing a pointer to it fails the same way. `assumingMemoryBound`
+    /// performs exactly the cast C performs. Getting this wrong is an
+    /// `Abort trap: 6`, not a wrong number, so it fails loudly.
+    static func footprintBytes(_ pid: Int32) -> Int64? {
+        var info = rusage_info_v6()
+        let result = withUnsafeMutablePointer(to: &info) { pointer -> Int32 in
+            let reinterpreted = UnsafeMutableRawPointer(pointer)
+                .assumingMemoryBound(to: rusage_info_t?.self)
+            return proc_pid_rusage(pid, RUSAGE_INFO_V6, reinterpreted)
+        }
+        guard result == 0 else { return nil }
+        return Int64(info.ri_phys_footprint)
     }
 
     /// Highest `metric` first. Split out so both rankings are one tested path.
