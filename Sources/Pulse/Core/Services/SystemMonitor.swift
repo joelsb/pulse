@@ -33,6 +33,12 @@ struct SystemSample: Sendable, Equatable {
 
     var diskFree: Int64 = 0
     var diskTotal: Int64 = 0
+    /// Reclaimable space: caches, snapshots and downloads macOS would evict on
+    /// demand. It is `...ForImportantUsage - ...AvailableCapacity`, i.e. the gap
+    /// between what the system promises an important write and what is free
+    /// right now. Worth showing because "11 GB free" and "11 GB free of which
+    /// 0.8 GB is cache the system will hand back" are different situations.
+    var diskPurgeable: Int64 = 0
 
     var thermal: ProcessInfo.ThermalState = .nominal
 
@@ -251,12 +257,21 @@ actor SystemSampler {
         let url = URL(fileURLWithPath: NSHomeDirectory())
         guard let values = try? url.resourceValues(forKeys: [
             .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey,
             .volumeTotalCapacityKey,
         ]) else { return }
         // "Important usage" is the number Finder shows: it counts purgeable
         // space the system would evict for you, unlike volumeAvailableCapacity.
+        //
+        // Reading the HOME directory, not "/": on APFS the root is a read-only
+        // system snapshot, so `df /` reports 51% while the data volume holding
+        // the user's files is at 97%. A clean, plausible, wrong answer.
         sample.diskFree = values.volumeAvailableCapacityForImportantUsage ?? 0
         sample.diskTotal = Int64(values.volumeTotalCapacity ?? 0)
+        // The difference between the two available-capacity keys IS the
+        // reclaimable cache; there is no direct "purgeable" key.
+        let immediatelyFree = Int64(values.volumeAvailableCapacity ?? 0)
+        sample.diskPurgeable = max(0, sample.diskFree - immediatelyFree)
     }
 
     // MARK: - Processes
@@ -331,6 +346,10 @@ final class SystemMonitor {
     private(set) var sample = SystemSample()
     /// Newest last, oldest first. Bounded so an all-day panel cannot grow it.
     private(set) var cpuHistory: [Double] = []
+    /// Memory utilization history, same cadence and bound as `cpuHistory`.
+    /// Kept separate rather than as a tuple series so each card animates on
+    /// its own value and neither redraws when only the other moved.
+    private(set) var memoryHistory: [Double] = []
     /// False until the first delta-based reading lands, so the card can show a
     /// placeholder instead of a fake 0%.
     private(set) var hasSample = false
@@ -376,9 +395,16 @@ final class SystemMonitor {
     func apply(_ next: SystemSample) {
         sample = next
         hasSample = true
-        cpuHistory.append(next.cpuTotal)
-        if cpuHistory.count > Self.historyLimit {
-            cpuHistory.removeFirst(cpuHistory.count - Self.historyLimit)
+        Self.append(next.cpuTotal, to: &cpuHistory)
+        Self.append(next.memoryUtilization, to: &memoryHistory)
+    }
+
+    /// Appends and trims in one place, so the two series can never drift out of
+    /// step on length or trimming rule.
+    private static func append(_ value: Double, to series: inout [Double]) {
+        series.append(value)
+        if series.count > historyLimit {
+            series.removeFirst(series.count - historyLimit)
         }
     }
 }

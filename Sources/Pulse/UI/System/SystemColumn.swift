@@ -15,7 +15,7 @@ struct SystemColumn: View {
             SystemColumnHeader(sample: monitor.sample, hasSample: monitor.hasSample)
 
             CPUCard(sample: monitor.sample, history: monitor.cpuHistory, hasSample: monitor.hasSample)
-            MemoryCard(sample: monitor.sample)
+            MemoryCard(sample: monitor.sample, history: monitor.memoryHistory)
             StorageCard(sample: monitor.sample)
 
             if showProcesses {
@@ -163,9 +163,10 @@ private struct CPUCard: View {
     }
 }
 
-/// Memory: used/total gauge, kernel pressure, compressed and swap.
+/// Memory: used/total gauge, history, kernel pressure, compressed and swap.
 private struct MemoryCard: View {
     let sample: SystemSample
+    let history: [Double]
 
     var body: some View {
         CardView {
@@ -183,6 +184,12 @@ private struct MemoryCard: View {
                     direction: .used
                 )
                 .help("Used \(Formatters.bytes(sample.memoryUsed)) of \(Formatters.bytes(sample.memoryTotal)). Kernel memory pressure: \(sample.memoryPressure.label).")
+
+                // Same treatment as CPU: the number says how full memory is,
+                // the shape says whether it is still climbing - which is the
+                // part that decides whether to start another agent.
+                Sparkline(values: history, color: pressureColor)
+                    .frame(height: 26)
 
                 HStack(spacing: 4) {
                     Text(Formatters.bytes(sample.memoryUsed))
@@ -228,6 +235,11 @@ private struct MemoryCard: View {
 
 /// Disk free on the boot volume - the thing that silently kills a long agent
 /// run that is writing logs, caches and node_modules.
+///
+/// No sparkline here on purpose: free space moves in gigabytes over hours, so a
+/// two-minute history would be a flat line on every healthy machine and would
+/// imply the number is worth watching second by second. The reclaimable figure
+/// is the useful extra instead.
 private struct StorageCard: View {
     let sample: SystemSample
 
@@ -248,6 +260,21 @@ private struct StorageCard: View {
                 }
                 .font(Typo.caption)
                 .foregroundStyle(.secondary)
+
+                // Only shown when there is something to reclaim: a permanent
+                // "reclaimable 0 B" row would be noise on a machine with no
+                // cache to evict.
+                if sample.diskPurgeable > 0 {
+                    HStack {
+                        Text("reclaimable cache")
+                        Spacer(minLength: 4)
+                        Text(Formatters.bytes(sample.diskPurgeable))
+                            .foregroundStyle(.primary)
+                    }
+                    .font(Typo.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Caches, snapshots and downloads macOS will evict when something needs the space. Counted inside the free figure above, so it is already promised to you - but it is not empty space today.")
+                }
             }
         }
     }

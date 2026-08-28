@@ -137,6 +137,35 @@ run_case() {
         'processes.sorted { metric($0) > metric($1) }' \
         'processes.sorted { metric($0) < metric($1) }' 
       ;;
+    purgeable-always-zero)
+      # Defect: the second capacity key is never read, so "reclaimable cache"
+      # reports a constant 0 B. Looks like a Mac with nothing to reclaim, which
+      # is indistinguishable from the feature being broken.
+      swap "$dir/src/SystemMonitor.swift" \
+        'sample.diskPurgeable = max(0, sample.diskFree - immediatelyFree)' \
+        'sample.diskPurgeable = 0'
+      ;;
+    purgeable-subtraction-flipped)
+      # Defect: subtraction the wrong way round. max(0,) then clamps it to zero,
+      # so the row silently disappears rather than showing a negative.
+      swap "$dir/src/SystemMonitor.swift" \
+        'sample.diskPurgeable = max(0, sample.diskFree - immediatelyFree)' \
+        'sample.diskPurgeable = max(0, immediatelyFree - sample.diskFree)'
+      ;;
+    memory-history-in-bytes)
+      # Defect: memory history fed raw bytes instead of utilization, pegging the
+      # sparkline at 100% permanently (the fixed 0...100 scale hides the cause).
+      swap "$dir/src/SystemMonitor.swift" \
+        'Self.append(next.memoryUtilization, to: &memoryHistory)' \
+        'Self.append(Double(next.memoryUsed), to: &memoryHistory)'
+      ;;
+    memory-history-never-trimmed)
+      # Defect: the memory series grows without bound while the panel stays
+      # open, and drifts out of step with the CPU series it is drawn beside.
+      swap "$dir/src/SystemMonitor.swift" \
+        'if series.count > historyLimit {' \
+        'if series.count > Int.max {'
+      ;;
     bundle-id-middle-truncated)
       # Defect: reverse-DNS process names left whole, so the UI middle-truncates
       # them into "com....ntent" — a row that identifies nothing. This is what
@@ -194,6 +223,10 @@ DEFECTS=(
   compact-bytes-has-space
   memory-card-resorts-cpu-list
   ranking-ascending
+  purgeable-always-zero
+  purgeable-subtraction-flipped
+  memory-history-in-bytes
+  memory-history-never-trimmed
 )
 UNCAUGHT=0
 for defect in "${DEFECTS[@]}"; do

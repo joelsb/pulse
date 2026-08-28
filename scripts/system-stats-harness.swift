@@ -287,6 +287,49 @@ if let pages = vmStatPages(),
 check(second.diskTotal > 0, "disk total read")
 check(second.diskFree > 0, "disk free read")
 check(second.diskFree <= second.diskTotal, "disk free within total")
+
+// Reclaimable cache is the gap between the two available-capacity keys, so it
+// can never exceed the free figure it is counted inside, and must never be
+// negative (max(0,) guards a transient where the two keys disagree).
+check(second.diskPurgeable >= 0, "reclaimable cache is not negative")
+check(
+    second.diskPurgeable <= second.diskFree,
+    "reclaimable cache sits inside the free figure (cache \(Formatters.bytes(second.diskPurgeable)), free \(Formatters.bytes(second.diskFree)))"
+)
+// Cross-check against the two URL keys read directly here, independently of
+// the sampler: purgeable IS importantUsage - availableCapacity.
+if let values = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [
+    .volumeAvailableCapacityForImportantUsageKey,
+    .volumeAvailableCapacityKey,
+]) {
+    let important = values.volumeAvailableCapacityForImportantUsage ?? 0
+    let plain = Int64(values.volumeAvailableCapacity ?? 0)
+    let expected = max(0, important - plain)
+
+    // TOLERANCE MUST BE SMALLER THAN THE VALUE IT CHECKS. A 1 GB slack was
+    // tried first and let BOTH a hard-coded zero and a flipped subtraction
+    // pass, because the real figure on this machine is ~0.76 GB and therefore
+    // "within tolerance" of nothing at all. 0.2 GB covers churn between two
+    // readings seconds apart without swallowing the defect.
+    let deltaGB = abs(Double(second.diskPurgeable - expected)) / 1_000_000_000
+    check(
+        deltaGB < 0.2,
+        "reclaimable cache matches importantUsage - availableCapacity (ours \(Formatters.bytes(second.diskPurgeable)), expected \(Formatters.bytes(expected)), off by \(String(format: "%.2f", deltaGB)) GB)"
+    )
+
+    // Independent of any tolerance: when the volume genuinely has reclaimable
+    // space, the sampler must report some. This is what a hard zero and a
+    // reversed subtraction both violate, and it cannot be tuned away.
+    if expected > 50_000_000 {
+        check(
+            second.diskPurgeable > 0,
+            "reclaimable cache is non-zero when the volume has \(Formatters.bytes(expected)) to reclaim"
+        )
+    }
+} else {
+    failures.append("could not read volume capacity keys to cross-check reclaimable cache")
+}
+
 check(second.load1 >= 0, "load average read")
 check(second.cpuTotal > 0, "second CPU reading sees the spin (got \(second.cpuTotal)%)")
 check(second.cpuTotal <= 100, "CPU capped at 100")
@@ -341,6 +384,46 @@ for row in second.topMemoryProcesses {
 check(
     zip(second.topProcesses, second.topProcesses.dropFirst()).allSatisfy { $0.cpu >= $1.cpu },
     "top processes are sorted by CPU descending"
+)
+
+// MARK: - 4b. History series
+
+// SystemMonitor is @MainActor, and top-level code in main.swift runs on the
+// main actor, so it can be driven directly here.
+let monitor = SystemMonitor()
+check(!monitor.hasSample, "monitor starts with no sample")
+
+for index in 0..<(SystemMonitor.historyLimit + 20) {
+    var synthetic = SystemSample()
+    synthetic.cpuTotal = Double(index % 101)
+    synthetic.memoryTotal = 100
+    // Cap at the total so utilization stays a real percentage; the final
+    // iteration therefore lands on 100 only if the loop runs past `total`.
+    synthetic.memoryUsed = Int64(min(index, Int(synthetic.memoryTotal)))
+    monitor.apply(synthetic)
+}
+
+check(monitor.hasSample, "monitor records a sample")
+checkEqual(monitor.cpuHistory.count, SystemMonitor.historyLimit, "CPU history is bounded")
+// Both series go through one append/trim path, so a length mismatch means one
+// of them is growing unbounded or being trimmed by a different rule — and the
+// two are drawn as if they covered the same window.
+checkEqual(monitor.memoryHistory.count, monitor.cpuHistory.count, "both histories stay the same length")
+// The loop's last index is historyLimit + 19, capped at the 100-byte total.
+let expectedLast = Double(min(SystemMonitor.historyLimit + 19, 100))
+checkEqual(monitor.memoryHistory.last ?? -1, expectedLast, "memory history ends at the newest value")
+
+// Utilization, not raw bytes: the sparkline draws on a fixed 0...100 scale, so
+// bytes would peg the line at the top forever and look like a pinned machine.
+let utilizationMonitor = SystemMonitor()
+var big = SystemSample()
+big.memoryTotal = 32_000_000_000
+big.memoryUsed = 8_000_000_000
+utilizationMonitor.apply(big)
+checkEqual(utilizationMonitor.memoryHistory, [25], "memory history stores utilization, not bytes")
+check(
+    (utilizationMonitor.memoryHistory.first ?? 0) <= 100,
+    "memory history stays on the 0...100 scale the sparkline draws"
 )
 
 // MARK: - 5. Sparkline geometry

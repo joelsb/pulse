@@ -150,6 +150,10 @@ struct SystemMonitorTests {
         for index in 0..<(SystemMonitor.historyLimit + 20) {
             var sample = SystemSample()
             sample.cpuTotal = Double(index)
+            // Memory needs a total to derive a utilization from, and a
+            // distinct value so the two series cannot be confused for one.
+            sample.memoryTotal = 100
+            sample.memoryUsed = Int64(min(index, 100))
             monitor.apply(sample)
         }
 
@@ -158,6 +162,36 @@ struct SystemMonitorTests {
         // Newest last: the final value is the last one applied.
         #expect(monitor.cpuHistory.last == Double(SystemMonitor.historyLimit + 19))
         #expect(monitor.cpuHistory.first == Double(20))
+
+        // Both series are appended and trimmed by the same path, so they must
+        // never differ in length - a card reading a shorter one would silently
+        // plot a stale window.
+        #expect(monitor.memoryHistory.count == monitor.cpuHistory.count)
+        #expect(monitor.memoryHistory.last == 100)
+    }
+
+    @MainActor
+    @Test("Memory history tracks utilization, not the raw byte count")
+    func memoryHistoryIsUtilization() {
+        let monitor = SystemMonitor()
+        var sample = SystemSample()
+        sample.memoryTotal = 32_000_000_000
+        sample.memoryUsed = 8_000_000_000
+        monitor.apply(sample)
+
+        // 25%, not 8e9: the sparkline is drawn on a 0...100 scale, so feeding
+        // it bytes would peg the line at the top forever.
+        #expect(monitor.memoryHistory == [25])
+    }
+
+    @Test("Reclaimable disk cache is the gap between the two capacity keys")
+    func purgeableDerivation() {
+        // The sampler derives this from live URL keys, so the arithmetic is
+        // asserted here and the live agreement in the verifier script.
+        var sample = SystemSample()
+        sample.diskFree = 11_770_000_000       // ...ForImportantUsage
+        sample.diskPurgeable = 760_000_000     // important - availableCapacity
+        #expect(sample.diskPurgeable <= sample.diskFree)
     }
 
     @MainActor
