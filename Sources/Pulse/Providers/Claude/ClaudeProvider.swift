@@ -14,6 +14,10 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
     private let api: ClaudeUsageAPI
     private let credentialsStore: ClaudeCredentialsStore
     private let parser: ClaudeLogParser
+    private let jcodeAccountLabel: String?
+    /// jcode's credential store, used only as a fallback when Claude Code's
+    /// token is expired. nil when the account has no jcode identity.
+    private let jcodeCredentialsStore: JcodeCredentialsStore?
 
     init(
         account: ClaudeAccount,
@@ -45,12 +49,25 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
                 ? nil
                 : "\(account.cacheNamespace)-files-v2\(captureTitles ? "" : "-blind")"
         )
+        self.jcodeAccountLabel = account.jcodeAccountLabel
+        self.jcodeCredentialsStore = account.jcodeAccountLabel == nil
+            ? nil
+            : JcodeCredentialsStore()
+    }
+
+    /// This account's credentials as jcode holds them, if any.
+    private func jcodeCredentials() -> ClaudeCredentials? {
+        guard let jcodeCredentialsStore, let jcodeAccountLabel else { return nil }
+        return jcodeCredentialsStore.credentials(forAccountLabel: jcodeAccountLabel)
     }
 
     func probeConnection() async -> ProviderConnection {
-        await credentialsStore.sourceExists()
-            ? .available
-            : .notConnected(hint: descriptor.setupHint)
+        if await credentialsStore.sourceExists() { return .available }
+        // An account signed in through jcode but never through Claude Code has
+        // no Keychain item, and would otherwise render as "not connected"
+        // despite having live credentials and parseable logs.
+        if jcodeCredentials() != nil { return .available }
+        return .notConnected(hint: descriptor.setupHint)
     }
 
     func fetch() async throws -> UsageSnapshot {
@@ -125,11 +142,34 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
     /// since the cache filled; Pulse never refreshes tokens itself. A 401
     /// with an unchanged token stays `.unauthorized`.
     private func loadLimits() async -> Limits {
-        let credentials: ClaudeCredentials
+        var credentials: ClaudeCredentials
         do {
             credentials = try await credentialsStore.credentials()
         } catch {
-            return Limits(plan: nil, windows: .failure(Self.asFetchError(error)))
+            // Claude Code has no usable token. jcode may still hold a live one
+            // for the same account, so a hard failure here is premature.
+            if let fallback = jcodeCredentials(), !fallback.isExpired() {
+                credentials = fallback
+            } else {
+                return Limits(plan: nil, windows: .failure(Self.asFetchError(error)))
+            }
+        }
+
+        // Claude Code only refreshes when Claude Code runs, so its token is
+        // routinely hours stale while jcode's copy of the same account is
+        // current. Prefer whichever store actually holds a valid token rather
+        // than a fixed order: sending the expired one wastes a request and,
+        // repeated every refresh tick, gets the endpoint to rate-limit the
+        // account (observed 2026-08-28, HTTP 429 with Retry-After 2808).
+        if credentials.isExpired(), let fallback = jcodeCredentials(), !fallback.isExpired() {
+            credentials = ClaudeCredentials(
+                accessToken: fallback.accessToken,
+                expiresAt: fallback.expiresAt,
+                // jcode records no plan, so keep the Keychain's label: the
+                // token is stale but the plan it names is not.
+                subscriptionType: credentials.subscriptionType,
+                rateLimitTier: credentials.rateLimitTier
+            )
         }
 
         do {
@@ -140,6 +180,14 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
             do {
                 let fresh = try await credentialsStore.credentials(forceReload: true)
                 guard fresh.accessToken != credentials.accessToken else {
+                    // Claude Code's token is unchanged and rejected. jcode is
+                    // the only remaining chance at a live token.
+                    if let fallback = jcodeCredentials(),
+                       !fallback.isExpired(),
+                       fallback.accessToken != credentials.accessToken {
+                        let response = try await api.fetchUsage(accessToken: fallback.accessToken)
+                        return Limits(plan: fresh.planLabel, windows: .success(response))
+                    }
                     return Limits(plan: fresh.planLabel, windows: .failure(.unauthorized))
                 }
                 let response = try await api.fetchUsage(accessToken: fresh.accessToken)

@@ -24,6 +24,10 @@ struct ClaudeAccount: Sendable, Equatable {
     let shortCode: String
     /// Config dir, e.g. `~/.claude-elara`.
     let configDir: URL
+    /// This account's label in jcode's account store (`claude-1`, `claude-2`),
+    /// used to find the same account's credentials there when Claude Code's
+    /// have gone stale. nil when jcode has no account for this profile.
+    let jcodeAccountLabel: String?
 
     var projectsRoot: URL { configDir.appendingPathComponent("projects") }
     var credentialsFile: URL { configDir.appendingPathComponent(".credentials.json") }
@@ -68,13 +72,15 @@ struct ClaudeAccount: Sendable, Equatable {
     ///    not silently vanish on a machine where Claude Code is not set up yet.
     static func discover(
         home: URL = AppPaths.home,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        jcodeLabels: [String: String] = jcodeAccountLabels()
     ) -> [ClaudeAccount] {
         let primary = ClaudeAccount(
             id: .claude,
             name: "Claude",
             shortCode: "CLA",
-            configDir: home.appendingPathComponent(".claude")
+            configDir: home.appendingPathComponent(".claude"),
+            jcodeAccountLabel: jcodeLabels["claude"] ?? "claude-1"
         )
 
         // NOT `.skipsHiddenFiles`: every Claude config dir starts with a dot,
@@ -99,7 +105,8 @@ struct ClaudeAccount: Sendable, Equatable {
                     id: .claudeAccount(suffix: suffix),
                     name: "Claude \(suffix.capitalizedFirstLetter)",
                     shortCode: Self.shortCode(for: suffix),
-                    configDir: url
+                    configDir: url,
+                    jcodeAccountLabel: jcodeLabels[suffix]
                 )
             )
         }
@@ -137,6 +144,41 @@ struct ClaudeAccount: Sendable, Equatable {
         return String(letters.prefix(3)).padding(toLength: 3, withPad: "·", startingAt: 0)
     }
 
+    // MARK: - jcode account mapping
+
+    /// Maps a config-dir suffix to jcode's account label (`claude-1`,
+    /// `claude-2`, ...) using jcode's own account order in `~/.jcode/auth.json`.
+    ///
+    /// Only the **label and email** are read. That file also holds live OAuth
+    /// tokens; nothing here parses, keeps or logs them.
+    static func jcodeAccountLabels(
+        authFile: URL = AppPaths.home.appendingPathComponent(".jcode/auth.json")
+    ) -> [String: String] {
+        guard let data = try? Data(contentsOf: authFile),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accounts = root["anthropic_accounts"] as? [[String: Any]]
+        else { return [:] }
+
+        // jcode labels accounts claude-1, claude-2, ... in file order, and the
+        // first is the primary profile. For the rest, the email's local part is
+        // the only available link to a `~/.claude-<suffix>` directory
+        // (elara@datainnovation.io -> elara).
+        var map: [String: String] = [:]
+        for (index, account) in accounts.enumerated() {
+            guard let label = account["label"] as? String else { continue }
+            let key: String
+            if index == 0 {
+                key = "claude"
+            } else if let email = account["email"] as? String,
+                      let local = email.split(separator: "@").first {
+                key = String(local).lowercased()
+            } else {
+                key = "account-\(index)"
+            }
+            map[key] = label
+        }
+        return map
+    }
 }
 
 private extension String {
