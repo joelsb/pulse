@@ -25,7 +25,16 @@ struct ModelPricingTests {
         "anthropic/claude-opus-5",
         "anthropic/claude-sonnet-5",
         "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        // Every model id observed in ~/.codex/sessions, including snapshots
+        // OpenAI has since retired - they stay in historical logs forever, so
+        // dropping them from the table would silently unprice old usage.
         "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.1-codex",
+        "gpt-5-codex",
+        "gpt-5.5",
+        "gpt-5.4",
     ]
 
     @Test(arguments: realWorldIDs)
@@ -112,6 +121,54 @@ struct ModelPricingTests {
                 cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0
             ) == nil
         )
+    }
+
+    /// Codex model rates, from each model's own page. The Codex line is where
+    /// substring matching is most dangerous: `gpt-5-codex` is a substring of
+    /// nothing, but a specific id must never resolve through a shorter key
+    /// belonging to a differently-priced model.
+    @Test func codexModelsResolveToTheirOwnRates() {
+        func rate(_ id: String) -> (Double, Double)? {
+            PricingTable.pricing(forClaudeModel: id).map { ($0.inputPerMTok, $0.outputPerMTok) }
+        }
+        #expect(rate("gpt-5.3-codex")! == (1.75, 14))
+        #expect(rate("gpt-5.2-codex")! == (1.75, 14))
+        #expect(rate("gpt-5.1-codex")! == (1.25, 10))
+        #expect(rate("gpt-5-codex")! == (1.25, 10))
+        #expect(rate("gpt-5.5")! == (5, 30))
+        #expect(rate("gpt-5.4")! == (2.50, 15))
+        #expect(rate("gpt-5.4-mini")! == (0.75, 4.50))
+    }
+
+    /// Codex reports `cached` as a **subset** of `input_tokens`, so the Input
+    /// column is the uncached remainder and the cached part bills at the 0.1x
+    /// read rate. Pricing the raw input double-counts the cached portion - on
+    /// this fixture that inflates the cost by 74%.
+    @Test func codexCostUsesTheUncachedRemainder() throws {
+        let tokens = CodexSessionParser.FileAggregate.Tokens(
+            input: 100_000, cached: 80_000, output: 10_000
+        )
+        let totals = CodexSessionParser.displayTotals(tokens, model: "gpt-5.3-codex")
+
+        #expect(totals.input == 20_000, "Input column shows input - cached")
+        #expect(totals.cacheRead == 80_000)
+        #expect(totals.cacheWrite == 0, "Codex logs carry no cache-write counter")
+
+        let expected = 20_000 / 1_000_000.0 * 1.75      // uncached input
+            + 80_000 / 1_000_000.0 * 0.175              // cached, at 0.1x
+            + 10_000 / 1_000_000.0 * 14                 // output
+        let cost = try #require(totals.costUSD)
+        #expect(abs(cost - expected) < 1e-9, "got \(cost), want \(expected)")
+    }
+
+    /// Without a resolvable model there is nothing to price against, and a zero
+    /// would render as a real, free request.
+    @Test func codexWithoutAKnownModelReportsNoCost() {
+        let tokens = CodexSessionParser.FileAggregate.Tokens(
+            input: 100_000, cached: 0, output: 10_000
+        )
+        #expect(CodexSessionParser.displayTotals(tokens, model: nil).costUSD == nil)
+        #expect(CodexSessionParser.displayTotals(tokens, model: "unknown-model").costUSD == nil)
     }
 
     /// A worked example straight from Anthropic's own docs, so the arithmetic

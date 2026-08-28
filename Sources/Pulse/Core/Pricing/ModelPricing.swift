@@ -105,9 +105,25 @@ enum PricingTable {
         "gpt-5.6-luna": .init(inputPerMTok: 0.20, outputPerMTok: 1.20),
         "gpt-5-6-cyber": .init(inputPerMTok: 12.50, outputPerMTok: 75),
         "gpt-5.6-cyber": .init(inputPerMTok: 12.50, outputPerMTok: 75),
-        // Codex CLI's own model, and the ChatGPT-surface model.
+        // Codex CLI's own models. These dominate real Codex usage (gpt-5.3-codex
+        // alone is 92% of local tokens), and the retired ones still appear in
+        // historical logs, so they are priced from their model pages rather
+        // than dropped when OpenAI removes them from the live pricing table.
         "gpt-5-3-codex": .init(inputPerMTok: 1.75, outputPerMTok: 14),
         "gpt-5.3-codex": .init(inputPerMTok: 1.75, outputPerMTok: 14),
+        "gpt-5-2-codex": .init(inputPerMTok: 1.75, outputPerMTok: 14),
+        "gpt-5.2-codex": .init(inputPerMTok: 1.75, outputPerMTok: 14),
+        "gpt-5-1-codex": .init(inputPerMTok: 1.25, outputPerMTok: 10),
+        "gpt-5.1-codex": .init(inputPerMTok: 1.25, outputPerMTok: 10),
+        "gpt-5-codex": .init(inputPerMTok: 1.25, outputPerMTok: 10),
+        // Flagship line, retired snapshots included for the same reason.
+        "gpt-5-5": .init(inputPerMTok: 5, outputPerMTok: 30),
+        "gpt-5.5": .init(inputPerMTok: 5, outputPerMTok: 30),
+        "gpt-5-4-mini": .init(inputPerMTok: 0.75, outputPerMTok: 4.50),
+        "gpt-5.4-mini": .init(inputPerMTok: 0.75, outputPerMTok: 4.50),
+        "gpt-5-4": .init(inputPerMTok: 2.50, outputPerMTok: 15),
+        "gpt-5.4": .init(inputPerMTok: 2.50, outputPerMTok: 15),
+        // The ChatGPT-surface model.
         "chat-latest": .init(inputPerMTok: 5, outputPerMTok: 30),
     ]
 }
