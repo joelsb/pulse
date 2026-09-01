@@ -120,6 +120,30 @@ struct SettingsView: View {
                 }
             }
 
+            Section {
+                sourceToggle(
+                    isOn: $settings.countProviderLogs,
+                    title: "Provider sessions",
+                    detail: "What the provider's own CLI logged — `~/.claude/projects`, `~/.codex/sessions`."
+                )
+                sourceToggle(
+                    isOn: $settings.countJcodeSessions,
+                    title: "jcode sessions",
+                    detail: "`~/.jcode/sessions`. jcode runs against these same accounts, so its tokens are billed here, not somewhere else."
+                )
+                sourceToggle(
+                    isOn: $settings.countPiSessions,
+                    title: "pi sessions",
+                    detail: "`~/.pi/agent/sessions`. Same account, different harness."
+                )
+            } header: {
+                Text("Count Tokens From")
+            } footer: {
+                Text("Applies to the token card, the daily chart and the breakdown together. Limits and quotas are never affected: they come from the provider's API and belong to the account, whichever tool spent it.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Usage Breakdown") {
                 Toggle(isOn: $settings.useSessionTitles) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -148,6 +172,26 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 420)
+    }
+
+    /// One "count this source" switch. Every change forces an immediate
+    /// refresh: the whole point of the switch is to watch the totals move, and
+    /// waiting up to five minutes for the next tick reads as a broken toggle.
+    private func sourceToggle(isOn: Binding<Bool>, title: String, detail: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { isOn.wrappedValue },
+            set: { newValue in
+                isOn.wrappedValue = newValue
+                environment.scheduler.refreshAll()
+            }
+        )) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                Text(.init(detail))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func providerRow(_ id: ProviderID, subtitle: String? = nil) -> some View {

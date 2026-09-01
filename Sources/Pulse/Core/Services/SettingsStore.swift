@@ -80,6 +80,10 @@ final class SettingsStore {
         static let breakdownTimeframe = "breakdownTimeframe"
         static let breakdownSort = "breakdownSort"
         static let useSessionTitles = "useSessionTitles"
+        static let countProviderLogs = "countProviderLogs"
+        static let countJcodeSessions = "countJcodeSessions"
+        static let countPiSessions = "countPiSessions"
+        static let breakdownSources = "breakdownSources"
         static let gaugeDirection = "gaugeDirection"
         static let showPaceMarker = "showPaceMarker"
         static let panelLayout = "panelLayout"
@@ -173,11 +177,57 @@ final class SettingsStore {
         didSet { defaults.set(breakdownSort.rawValue, forKey: Key.breakdownSort) }
     }
 
+    /// Source filter of the breakdown window **only**. Deliberately separate
+    /// from the three `count*` switches: the panel answers "what am I
+    /// spending", and the breakdown answers "what did this tool cost me on this
+    /// project", which needs a source turned off for one question without
+    /// changing the answer to the other.
+    var breakdownSources: UsageSourceSelection {
+        didSet { defaults.set(breakdownSources.storedValue, forKey: Key.breakdownSources) }
+    }
+
     /// Whether the breakdown may show CLI-generated session titles (Claude's
     /// `ai-title`). When false, Pulse stays strictly content-blind: title
     /// records are never even decoded. Default on (the user opted into titles).
     var useSessionTitles: Bool {
         didSet { defaults.set(useSessionTitles, forKey: Key.useSessionTitles) }
+    }
+
+    // MARK: - Which session logs count
+
+    /// Count the provider CLI's own logs (`~/.claude/projects`, `~/.codex/sessions`).
+    var countProviderLogs: Bool {
+        didSet {
+            defaults.set(countProviderLogs, forKey: Key.countProviderLogs)
+            publishUsageSources()
+        }
+    }
+
+    /// Count jcode's sessions (`~/.jcode/sessions`), which bill the same accounts.
+    var countJcodeSessions: Bool {
+        didSet {
+            defaults.set(countJcodeSessions, forKey: Key.countJcodeSessions)
+            publishUsageSources()
+        }
+    }
+
+    /// Count pi's sessions (`~/.pi/agent/sessions`), which bill the same accounts.
+    var countPiSessions: Bool {
+        didSet {
+            defaults.set(countPiSessions, forKey: Key.countPiSessions)
+            publishUsageSources()
+        }
+    }
+
+    /// The three switches as the provider actors read them. Pushed on every
+    /// change (and once at init) rather than pulled, because Core must not
+    /// depend on this `@MainActor` type.
+    private func publishUsageSources() {
+        UsageSourceGate.shared.current = UsageSourceSelection(
+            providerLogs: countProviderLogs,
+            jcode: countJcodeSessions,
+            pi: countPiSessions
+        )
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -239,8 +289,17 @@ final class SettingsStore {
             .flatMap(BreakdownTimeframe.init(rawValue:)) ?? .last30Days
         breakdownSort = defaults.string(forKey: Key.breakdownSort)
             .flatMap(BreakdownSort.init(rawValue:)) ?? .tokens
+        // Absent key (never touched) means every source, not none.
+        breakdownSources = UsageSourceSelection(stored: defaults.stringArray(forKey: Key.breakdownSources))
         // Default on: the user opted into CLI-generated titles in the design phase.
         useSessionTitles = (defaults.object(forKey: Key.useSessionTitles) as? Bool) ?? true
+
+        // All three default on: the totals before these switches existed
+        // counted every source, so any other default would silently change a
+        // returning user's numbers on upgrade.
+        countProviderLogs = (defaults.object(forKey: Key.countProviderLogs) as? Bool) ?? true
+        countJcodeSessions = (defaults.object(forKey: Key.countJcodeSessions) as? Bool) ?? true
+        countPiSessions = (defaults.object(forKey: Key.countPiSessions) as? Bool) ?? true
 
         // Providers introduced by an app update default to enabled+visible even
         // when older persisted selections predate them (e.g. Copilot arriving
@@ -270,6 +329,11 @@ final class SettingsStore {
         // and reappear the moment its directory did.
         defaults.set(enabledProviders.map(\.rawValue), forKey: Key.enabledProviders)
         defaults.set(menuBarProviders.map(\.rawValue).sorted(), forKey: Key.menuBarProviders)
+
+        // Providers read the gate on their first refresh, which can begin
+        // before any view touches Settings, so it is seeded here rather than
+        // by the first `didSet`.
+        publishUsageSources()
     }
 
     /// Providers actually shown in the bar: enabled ∩ menuBarProviders, canonical order.
