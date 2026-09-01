@@ -32,8 +32,17 @@ struct SystemColumn: View {
                     metric: .memory
                 )
             }
-
-            Spacer(minLength: 0)
+            // NO trailing Spacer. This column is measured, not scrolled: its
+            // height is reported up to PanelController, which resizes the
+            // window to it. A Spacer here expands to the *proposed* height,
+            // i.e. the window's current height, so the reported height becomes
+            // the window height and the panel can never shrink again — it
+            // stays at whatever it once grew to, with dead space under the
+            // cards. Measured 2026-09-01 with an offscreen NSHostingView:
+            // content 338pt reported as 560 in a 560pt window and 1200 in a
+            // 1200pt window; without the Spacer, 338 in both. HStack(alignment:
+            // .top) already top-aligns the columns, so the Spacer bought
+            // nothing. See scripts/check-panel-height.py.
         }
         .frame(width: Layout.systemColumnWidth)
         // Ref-counted polling: the sampler runs only while this column is on

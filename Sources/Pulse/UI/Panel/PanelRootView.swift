@@ -127,8 +127,11 @@ struct PanelRootView: View {
                         )
 
                         cardArea
-
-                        Spacer(minLength: 0)
+                        // No trailing Spacer: this VStack's height is measured
+                        // and becomes the window height, and a Spacer expands
+                        // to the proposed (window) height, pinning the panel at
+                        // whatever size it once reached. Same defect as the one
+                        // documented in SystemColumn.
                     }
                     .frame(width: columnWidth)
                 }
