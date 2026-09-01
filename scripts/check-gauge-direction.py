@@ -17,6 +17,8 @@ UI = pathlib.Path("Sources/Pulse/UI")
 # Surfaces that render a limit-window percentage to the user.
 SURFACES = [
     "Panel/LimitGaugeCard.swift",
+    "Panel/ProviderGlanceCard.swift",
+    "Components/RingGauge.swift",
     "StatusBar/StatusBarLabelView.swift",
 ]
 

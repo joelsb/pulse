@@ -50,6 +50,19 @@ struct PanelRootView: View {
 
     private var isColumns: Bool { settings.panelLayout == .columns && tabs.count > 1 }
 
+    /// Simple view: one ring + weekly bar per provider, CPU and memory for the
+    /// machine, nothing else. Independent of `panelLayout` - it is always
+    /// side by side, because three cards this short have nothing to gain from
+    /// a tab bar hiding two of them.
+    private var isSimple: Bool { settings.panelMode == .simple }
+
+    /// Providers drawn in the simple view, clamped to what the screen holds.
+    private var glanceColumns: [ProviderID] {
+        let usable = state.maxPanelWidth - 2 * Layout.panelPadding - systemWidth + Layout.cardGap
+        let fits = max(Int(usable / (Layout.glanceColumnWidth + Layout.cardGap)), 1)
+        return Array(tabs.prefix(fits))
+    }
+
     /// Whether the machine-stats sidebar is drawn. It sits left of the
     /// providers in both layouts - with a single provider tab that means left
     /// of that one tab, which is exactly the arrangement that makes it useful
@@ -89,6 +102,11 @@ struct PanelRootView: View {
     /// Panel width: the optional stats sidebar, plus one column, or N columns
     /// and the gaps between them.
     private var contentWidth: CGFloat {
+        if isSimple {
+            let count = CGFloat(glanceColumns.count)
+            return count * Layout.glanceColumnWidth + (count - 1) * Layout.cardGap
+                + 2 * Layout.panelPadding + systemWidth
+        }
         guard isColumns else { return Layout.panelWidth + systemWidth }
         let count = CGFloat(columns.count)
         return count * columnWidth + (count - 1) * Layout.cardGap + 2 * Layout.panelPadding + systemWidth
@@ -109,11 +127,14 @@ struct PanelRootView: View {
                 if showsSystem {
                     SystemColumn(
                         monitor: environment.system,
-                        showProcesses: settings.showSystemProcesses
+                        showProcesses: settings.showSystemProcesses,
+                        isCompact: isSimple
                     )
                 }
 
-                if isColumns {
+                if isSimple {
+                    glanceArea
+                } else if isColumns {
                     columnArea
                 } else {
                     VStack(spacing: Layout.cardGap) {
@@ -143,10 +164,12 @@ struct PanelRootView: View {
 
             PanelBottomBar(
                 providerName: environment.descriptor(for: selection).name,
+                mode: settings.panelMode,
                 openProvider: {
                     environment.openProvider(selection)
                     onClose()
                 },
+                toggleMode: toggleMode,
                 openBreakdown: onOpenBreakdown,
                 openSettings: onOpenSettings,
                 minimize: onClose,
@@ -154,6 +177,48 @@ struct PanelRootView: View {
             )
         }
         .padding(Layout.panelPadding)
+    }
+
+    /// The simple view's provider area. Deliberately NOT wrapped in a
+    /// ScrollView: the whole point is that it fits, and a scroll view here
+    /// would reintroduce the measured-height fight the columns layout has to
+    /// manage. If it ever stops fitting, that is a signal the view has grown
+    /// past its brief.
+    private var glanceArea: some View {
+        HStack(alignment: .top, spacing: Layout.cardGap) {
+            ForEach(glanceColumns) { provider in
+                VStack(spacing: Layout.cardGap) {
+                    ProviderColumnHeader(
+                        name: environment.descriptor(for: provider).name,
+                        accent: PulseColor.accent(provider),
+                        isActive: provider == selection,
+                        select: { withAnimation(Motion.tabPill) { settings.selectedTab = provider } },
+                        open: {
+                            environment.openProvider(provider)
+                            onClose()
+                        }
+                    )
+
+                    ProviderGlanceCard(
+                        descriptor: environment.descriptor(for: provider),
+                        record: store.record(for: provider),
+                        settings: settings,
+                        openSettings: onOpenSettings
+                    )
+                    // NO trailing Spacer. This tree is measured and becomes the
+                    // window height (see SystemColumn and
+                    // scripts/check-panel-height.py); HStack(alignment: .top)
+                    // already top-aligns the columns.
+                }
+                .frame(width: Layout.glanceColumnWidth)
+            }
+        }
+    }
+
+    private func toggleMode() {
+        withAnimation(Motion.tabPill) {
+            settings.panelMode = settings.panelMode == .simple ? .full : .simple
+        }
     }
 
     /// Side-by-side layout: every enabled provider gets its own full column,
@@ -264,6 +329,7 @@ struct PanelRootView: View {
             Button("") { environment.scheduler.refreshAll() }.keyboardShortcut("r", modifiers: .command)
             Button("") { onOpenSettings() }.keyboardShortcut(",", modifiers: .command)
             Button("") { onOpenBreakdown() }.keyboardShortcut("b", modifiers: .command)
+            Button("") { toggleMode() }.keyboardShortcut("e", modifiers: .command)
             Button("") { NSApp.terminate(nil) }.keyboardShortcut("q", modifiers: .command)
             Button("") { cycleTab(1) }.keyboardShortcut(.rightArrow, modifiers: [])
             Button("") { cycleTab(-1) }.keyboardShortcut(.leftArrow, modifiers: [])

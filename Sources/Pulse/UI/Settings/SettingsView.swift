@@ -70,12 +70,25 @@ struct SettingsView: View {
             }
 
             Section("Panel") {
+                Picker("Show", selection: $settings.panelMode) {
+                    ForEach(SettingsStore.PanelMode.allCases, id: \.self) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                Text(settings.panelMode == .simple
+                    ? "One ring per provider for the live session window, its weekly bar underneath, and CPU + memory for this Mac. Rates, history and token costs are one click away (⌘E, or the button left of the analytics icon)."
+                    : "Every card each provider publishes: session and weekly gauges, per-model caps, usage rate, daily history, token costs. ⌘E switches to the short version.")
+                    .font(Typo.caption)
+                    .foregroundStyle(.secondary)
+
                 Picker("Providers", selection: $settings.panelLayout) {
                     ForEach(SettingsStore.PanelLayout.allCases, id: \.self) { option in
                         Text(option.title).tag(option)
                     }
                 }
                 .pickerStyle(.radioGroup)
+                .disabled(settings.panelMode == .simple)
                 Text(settings.panelLayout == .columns
                     ? "One click shows every enabled provider at once, side by side. The panel widens by one column per provider, capped at what the screen holds."
                     : "One provider at a time, switched with the tab bar (⌘1…⌘4, arrow keys).")

@@ -28,6 +28,29 @@ final class SettingsStore {
         }
     }
 
+    /// How much of the panel is drawn.
+    ///
+    /// Two modes rather than a pile of per-card switches: the full view answers
+    /// "where did my usage go", the simple view answers "can I keep working",
+    /// and those want different amounts of screen. Toggled from the bottom bar
+    /// (⌘E) so the answer to the second question is never more than one glance
+    /// away, and the first is never more than one click away.
+    enum PanelMode: String, CaseIterable, Sendable {
+        /// Every card the provider publishes: rates, histograms, tokens, disk,
+        /// processes. What the panel has always shown.
+        case full
+        /// One ring per provider for the live session window, its weekly bar
+        /// underneath, and CPU + memory for the machine. Nothing else.
+        case simple
+
+        var title: String {
+            switch self {
+            case .full: "Everything"
+            case .simple: "Just the essentials"
+            }
+        }
+    }
+
     /// Which direction a limit gauge reads.
     enum GaugeDirection: String, CaseIterable, Sendable {
         /// Consumption: bar fills left to right as usage climbs, percentage is
@@ -87,6 +110,7 @@ final class SettingsStore {
         static let gaugeDirection = "gaugeDirection"
         static let showPaceMarker = "showPaceMarker"
         static let panelLayout = "panelLayout"
+        static let panelMode = "panelMode"
         static let showSystemStats = "showSystemStats"
         static let showSystemProcesses = "showSystemProcesses"
     }
@@ -133,6 +157,14 @@ final class SettingsStore {
     /// provider, so the controller derives the window width from this.
     var panelLayout: PanelLayout {
         didSet { defaults.set(panelLayout.rawValue, forKey: Key.panelLayout) }
+    }
+
+    /// Whether the panel draws every card or only the glance view. Orthogonal
+    /// to `panelLayout`: the simple view always puts providers side by side,
+    /// because with two or three cards that short there is nothing to gain from
+    /// hiding all but one behind a tab bar.
+    var panelMode: PanelMode {
+        didSet { defaults.set(panelMode.rawValue, forKey: Key.panelMode) }
     }
 
     /// Whether the panel carries the machine-stats sidebar on its left. It is
@@ -271,6 +303,12 @@ final class SettingsStore {
         // showing all of them beats three clicks showing one each.
         panelLayout = defaults.string(forKey: Key.panelLayout)
             .flatMap(PanelLayout.init(rawValue:)) ?? .columns
+
+        // Default full: an existing user's panel must not silently lose cards
+        // on upgrade, and a new user has to see what the app can do before
+        // being offered the short version of it.
+        panelMode = defaults.string(forKey: Key.panelMode)
+            .flatMap(PanelMode.init(rawValue:)) ?? .full
 
         // Default on: the sidebar is the reason the panel is useful while an
         // agent is running locally, and it is invisible unless the panel is open.

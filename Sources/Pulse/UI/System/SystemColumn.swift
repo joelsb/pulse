@@ -9,16 +9,35 @@ import SwiftUI
 struct SystemColumn: View {
     let monitor: SystemMonitor
     let showProcesses: Bool
+    /// Simple-view form: CPU and memory only, each reduced to headline, bar and
+    /// graph. The P/E split, load average, disk card and process tables are all
+    /// diagnostics - they answer "why is it slow", which is a question you ask
+    /// in the full view, after this column has told you that it *is* slow.
+    ///
+    /// Disk survives as a single red line above 90%, and only above 90%,
+    /// because a full boot volume kills a long agent run with less warning than
+    /// anything else here.
+    var isCompact = false
 
     var body: some View {
         VStack(spacing: Layout.cardGap) {
             SystemColumnHeader(sample: monitor.sample, hasSample: monitor.hasSample)
 
-            CPUCard(sample: monitor.sample, history: monitor.cpuHistory, hasSample: monitor.hasSample)
-            MemoryCard(sample: monitor.sample, history: monitor.memoryHistory)
-            StorageCard(sample: monitor.sample)
+            CPUCard(
+                sample: monitor.sample,
+                history: monitor.cpuHistory,
+                hasSample: monitor.hasSample,
+                isCompact: isCompact
+            )
+            MemoryCard(sample: monitor.sample, history: monitor.memoryHistory, isCompact: isCompact)
 
-            if showProcesses {
+            if isCompact {
+                DiskWarningLine(sample: monitor.sample)
+            } else {
+                StorageCard(sample: monitor.sample)
+            }
+
+            if showProcesses, !isCompact {
                 TopProcessesCard(
                     title: "Top by CPU",
                     systemImage: "gauge.with.needle",
@@ -136,6 +155,7 @@ private struct CPUCard: View {
     let sample: SystemSample
     let history: [Double]
     let hasSample: Bool
+    var isCompact = false
 
     var body: some View {
         CardView {
@@ -165,13 +185,13 @@ private struct CPUCard: View {
                 GaugeBar(utilization: sample.cpuTotal, direction: .used)
 
                 Sparkline(values: history, color: PulseColor.threshold(utilization: sample.cpuTotal))
-                    .frame(height: 26)
+                    .frame(height: isCompact ? 34 : 26)
 
                 // The P/E split, when the machine has one. The aggregate hides
                 // the case that actually matters: on a 4P+6E Mac, a build
                 // pegging all four P-cores reads as ~40% overall, which looks
                 // like headroom and is not.
-                if sample.hasCoreSplit {
+                if sample.hasCoreSplit, !isCompact {
                     VStack(spacing: 4) {
                         clusterRow(
                             label: "P",
@@ -188,9 +208,13 @@ private struct CPUCard: View {
                 }
 
                 HStack(spacing: 4) {
-                    Text("usr \(Formatters.percent(sample.cpuUser))")
-                    Text("·")
-                    Text("sys \(Formatters.percent(sample.cpuSystem))")
+                    if !isCompact {
+                        Text("usr \(Formatters.percent(sample.cpuUser))")
+                        Text("·")
+                        Text("sys \(Formatters.percent(sample.cpuSystem))")
+                    } else {
+                        Text("load")
+                    }
                     Spacer(minLength: 4)
                     Text(String(format: "%.2f", sample.load1))
                         .foregroundStyle(loadColor)
@@ -243,6 +267,7 @@ private struct CPUCard: View {
 private struct MemoryCard: View {
     let sample: SystemSample
     let history: [Double]
+    var isCompact = false
 
     var body: some View {
         CardView {
@@ -277,7 +302,7 @@ private struct MemoryCard: View {
                 // the shape says whether it is still climbing - which is the
                 // part that decides whether to start another agent.
                 Sparkline(values: history, color: pressureColor)
-                    .frame(height: 26)
+                    .frame(height: isCompact ? 34 : 26)
 
                 HStack(spacing: 4) {
                     Text(Formatters.bytes(sample.memoryUsed))
@@ -292,11 +317,17 @@ private struct MemoryCard: View {
                 .font(Typo.captionValue)
                 .foregroundStyle(.secondary)
 
+                // Compressed is dropped in the compact form and swap is not:
+                // compression is normal housekeeping, swap in use while an
+                // agent runs is the thing that makes everything feel slow.
                 HStack(spacing: 4) {
-                    Text("compressed \(Formatters.bytes(sample.memoryCompressed))")
-                    Spacer(minLength: 4)
+                    if !isCompact {
+                        Text("compressed \(Formatters.bytes(sample.memoryCompressed))")
+                        Spacer(minLength: 4)
+                    }
                     Text("swap \(Formatters.bytes(sample.swapUsed))")
                         .foregroundStyle(sample.swapUsed > 0 ? AnyShapeStyle(swapColor) : AnyShapeStyle(.secondary))
+                        .frame(maxWidth: .infinity, alignment: isCompact ? .leading : .trailing)
                 }
                 .font(Typo.caption)
                 .foregroundStyle(.secondary)
@@ -364,6 +395,33 @@ private struct StorageCard: View {
                     .help("Caches, snapshots and downloads macOS will evict when something needs the space. Counted inside the free figure above, so it is already promised to you - but it is not empty space today.")
                 }
             }
+        }
+    }
+}
+
+/// Disk in the simple view: nothing at all until the boot volume passes 90%,
+/// then one coloured line.
+///
+/// A permanent disk card there would be a number that does not move and does
+/// not need watching, spending a third of the column. But the failure it warns
+/// about is the one that gives the least warning - a volume at 97% ends a long
+/// run mid-write - so it earns its line the moment it becomes true, and stays
+/// invisible the rest of the time.
+private struct DiskWarningLine: View {
+    let sample: SystemSample
+
+    var body: some View {
+        if sample.diskUtilization >= 90 {
+            HStack(spacing: 5) {
+                ThemedIcon(symbol: "exclamationmark.triangle", pointSize: 9, weight: .semibold)
+                Text("Disk \(Formatters.percent(sample.diskUtilization)) full")
+                Spacer(minLength: 4)
+                Text(Formatters.bytes(sample.diskFree) + " free")
+            }
+            .font(Typo.caption)
+            .foregroundStyle(sample.diskUtilization >= 95 ? PulseColor.critical : PulseColor.warnStrong)
+            .padding(.horizontal, 4)
+            .help("Boot volume is nearly full. A long agent run writing logs, caches or node_modules can fail on this before it hits any provider limit. Full detail in the everything view.")
         }
     }
 }

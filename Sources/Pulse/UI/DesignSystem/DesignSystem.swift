@@ -165,6 +165,11 @@ enum Layout {
     /// numbers and a sparkline, not charts and tables, and a full-width one
     /// would compete with the providers it is meant to sit beside.
     static let systemColumnWidth: CGFloat = 210
+    /// One provider column in the simple view. Sized from its contents: a
+    /// 104pt ring plus card padding, with enough left over for "5-Hour
+    /// Session" and a reset countdown on one line each. Narrower than the
+    /// stats sidebar on purpose - it carries two numbers, not eight.
+    static let glanceColumnWidth: CGFloat = 164
     static let panelRadius: CGFloat = 20
     static let panelPadding: CGFloat = 10
     static let cardRadius: CGFloat = 10 // panelRadius − panelPadding

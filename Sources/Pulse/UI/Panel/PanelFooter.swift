@@ -108,7 +108,12 @@ struct PanelFooter: View {
 /// panel back into the menu bar) · quit.
 struct PanelBottomBar: View {
     let providerName: String
+    /// Which view is on screen now. The button shows the glyph for what it
+    /// will *do*, never for the state it is in - a toggle labelled with its own
+    /// state is read backwards by half the people who see it.
+    let mode: SettingsStore.PanelMode
     let openProvider: () -> Void
+    let toggleMode: () -> Void
     let openBreakdown: () -> Void
     let openSettings: () -> Void
     let minimize: () -> Void
@@ -119,6 +124,17 @@ struct PanelBottomBar: View {
             HStack(spacing: 4) {
                 BarButton(title: "Open \(providerName)", tint: PulseColor.info, action: openProvider)
                 Spacer()
+                // Immediately left of the analytics button: the two of them are
+                // the "show me more" pair, and this is the cheaper of the two.
+                GhostIconButton(
+                    systemImage: mode == .simple
+                        ? "rectangle.expand.vertical"
+                        : "rectangle.compress.vertical",
+                    help: mode == .simple
+                        ? "Show everything — rates, history, tokens (⌘E)"
+                        : "Back to the essentials — sessions, weekly, CPU, memory (⌘E)",
+                    action: toggleMode
+                )
                 GhostIconButton(systemImage: "chart.bar.xaxis", help: "Usage by project · session (⌘B)", action: openBreakdown)
                 BarButton(title: "Settings", action: openSettings)
                 GhostIconButton(systemImage: "minus", help: "Minimize — Pulse stays in the menu bar (esc)", action: minimize)
