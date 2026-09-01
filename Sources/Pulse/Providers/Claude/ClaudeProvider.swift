@@ -160,6 +160,7 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
         case .failure(let error):
             limitsError = error
             snapshot.limitsUnavailable = true
+            snapshot.limitsError = error
             snapshot.statusNotes.append("Limits unavailable: \(error.userMessage)")
         }
 
@@ -299,6 +300,9 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
             case .unauthorized: 5
             case .notLoggedIn: 4
             case .parsing: 3
+            // A rate limit outranks a plain HTTP error: it is the one the user
+            // can act on (wait, or refresh the token that caused it).
+            case .rateLimited: 3
             case .http: 2
             case .network: 1
             case .dataUnavailable: 0

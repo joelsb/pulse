@@ -107,6 +107,12 @@ enum Formatters {
         return "\(minutes)m"
     }
 
+    /// "47m", "2h 14m", "<1m" for a plain duration (a `Retry-After`, a
+    /// cooldown) rather than a countdown to a date.
+    static func duration(_ interval: TimeInterval) -> String {
+        countdown(to: Date(timeIntervalSinceNow: interval), now: .now)
+    }
+
     /// "11:44 PM" in the user's locale.
     static func clockTime(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)

@@ -85,6 +85,9 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
         }
         if snapshot.primary == nil {
             snapshot.limitsUnavailable = true
+            // Same reason as Claude: the scheduler cannot back off on a failure
+            // it never sees. See UsageSnapshot.limitsError.
+            snapshot.limitsError = limitsError
             snapshot.statusNotes.append("No rate-limit data: \(limitsError?.userMessage ?? "unavailable")")
         }
         // A dead token must not hide behind stale session-log gauges.
