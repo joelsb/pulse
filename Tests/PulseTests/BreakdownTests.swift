@@ -467,7 +467,7 @@ struct DemoBreakdownDataTests {
 
     @Test func claudeDemoHasByteProjectsWithCostAndAnActiveSession() async throws {
         let breakdown = try #require(
-            await DemoBreakdownProvider(id: .claude).projectBreakdown(timeframe: .last30Days, now: now)
+            await DemoBreakdownProvider(id: .claude).projectBreakdown(timeframe: .last30Days, sources: .all, now: now)
         )
         #expect(breakdown.showsCost)
         #expect(Set(breakdown.projects.map(\.name)) == ["byte-pulse", "pulse-website", "byte-ui", "byte-api", "byte-cli"])
@@ -483,7 +483,7 @@ struct DemoBreakdownDataTests {
 
     @Test func codexDemoHasTokensButNoCostOrTitles() async throws {
         let breakdown = try #require(
-            await DemoBreakdownProvider(id: .codex).projectBreakdown(timeframe: .last30Days, now: now)
+            await DemoBreakdownProvider(id: .codex).projectBreakdown(timeframe: .last30Days, sources: .all, now: now)
         )
         #expect(!breakdown.showsCost)
         #expect(breakdown.grandTotal.total > 0)
@@ -493,7 +493,7 @@ struct DemoBreakdownDataTests {
     }
 
     @Test func unsupportedDemoProviderIsNil() async {
-        #expect(await DemoBreakdownProvider(id: .cursor).projectBreakdown(timeframe: .last7Days, now: now) == nil)
+        #expect(await DemoBreakdownProvider(id: .cursor).projectBreakdown(timeframe: .last7Days, sources: .all, now: now) == nil)
     }
 
     @Test func serviceAcceptsBreakdownProvidersDirectly() async {
