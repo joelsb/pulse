@@ -239,6 +239,9 @@ struct SettingsView: View {
             if id.isClaudeAccount {
                 Spacer(minLength: 8)
                 ClaudeSignInButton(id: id, environment: environment)
+            } else if id == .codex {
+                Spacer(minLength: 8)
+                CodexSignInButton(environment: environment)
             }
         }
     }
@@ -403,6 +406,102 @@ private struct ClaudeSignInButton: View {
         // used to fall through to the same bare "Sign-in failed" as a 400
         // from the token endpoint, which is why a human saw one useless
         // string for two unrelated causes (round 5). Named here instead.
+        if let keychainFailure = error as? KeychainWriter.Failure {
+            switch keychainFailure {
+            case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"
+            case .failed: return "Sign-in succeeded, but the Keychain didn’t respond - try again"
+            }
+        }
+        return "Sign-in failed"
+    }
+}
+
+/// "Sign in" for the Codex row (JSB-9), same shape as `ClaudeSignInButton`.
+/// Unlike Claude, Codex has exactly one Pulse-tracked account, so there is no
+/// "which row did it land on" ambiguity to caveat.
+private struct CodexSignInButton: View {
+    let environment: AppEnvironment
+
+    private enum Phase: Equatable {
+        case idle, working, succeeded(email: String?), failed(String)
+    }
+
+    @State private var phase: Phase = .idle
+
+    var body: some View {
+        HStack(spacing: 6) {
+            statusLabel
+            Button(action: signIn) {
+                if phase == .working {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Text("Sign in…")
+                }
+            }
+            .disabled(phase == .working)
+            .controlSize(.small)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch phase {
+        case .succeeded(let email):
+            Text(email.map { "Signed in as \($0)" } ?? "Signed in")
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.ok)
+        case .failed(let message):
+            Text(message)
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.critical)
+                .lineLimit(1)
+                .frame(maxWidth: 140, alignment: .trailing)
+        case .idle, .working:
+            EmptyView()
+        }
+    }
+
+    private func signIn() {
+        guard phase != .working else { return }
+        phase = .working
+        Task {
+            do {
+                _ = try await environment.codexOAuthStore.signIn { url in
+                    NSWorkspace.shared.open(url)
+                }
+                // No email to show here: `CodexOAuthStore.Credentials` never
+                // holds the id_token past sign-in (constraint 7), and the
+                // masked-email claim lives in that token, not in accountID.
+                phase = .succeeded(email: nil)
+                environment.scheduler.refreshAll()
+            } catch is CancellationError {
+                phase = .idle
+            } catch {
+                phase = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// Never includes token material — same discipline as `ClaudeSignInButton.message`.
+    private static func message(for error: Error) -> String {
+        if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
+        if let tokenEndpointError = error as? CodexOAuthClient.TokenEndpointError {
+            switch tokenEndpointError {
+            case .invalidGrant: return "Sign-in was rejected - try again"
+            case .other(let status): return "Sign-in failed (\(status))"
+            }
+        }
+        if let listenerFailure = error as? LoopbackCallbackListener.Failure {
+            switch listenerFailure {
+            case .timeout: return "Timed out waiting for the browser"
+            case .deniedByProvider: return "Sign-in was declined"
+            case .invalidCallback: return "Unexpected sign-in response"
+            // Constraint 1: port 1455 is the Codex CLI's OWN login port — a
+            // bind failure here almost always means a `codex login` is
+            // running at the same time, not a generic "port busy" cause.
+            case .listenerFailed: return "Couldn’t open port 1455 - a Codex CLI login may be in progress"
+            }
+        }
         if let keychainFailure = error as? KeychainWriter.Failure {
             switch keychainFailure {
             case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"

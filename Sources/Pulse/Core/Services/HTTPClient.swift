@@ -47,6 +47,41 @@ struct HTTPClient: Sendable {
         return try await sendRaw(request)
     }
 
+    /// Same shape as `postRaw`, but the body is `application/x-www-form-urlencoded`
+    /// instead of JSON — JSB-9: OpenAI's `/oauth/token` rejects a JSON body
+    /// outright (Anthropic's, which `postRaw`/`jsonBody` already serve, takes
+    /// JSON). Added alongside the JSON path rather than replacing it — every
+    /// existing `postRaw`/`post` caller, and `scripts/verify-rate-limit-backoff.sh`,
+    /// which exercises `postRaw`'s JSON path indirectly through `ClaudeOAuthClient`,
+    /// keeps working unchanged.
+    func postFormRaw(_ url: URL, headers: [String: String] = [:], form: [String: String]) async throws -> (status: Int, data: Data, response: HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(Self.formEncode(form).utf8)
+        return try await sendRaw(request)
+    }
+
+    /// `application/x-www-form-urlencoded`, RFC 3986 unreserved characters
+    /// plus `-._~` left alone, everything else percent-encoded — deliberately
+    /// NOT `addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)`,
+    /// which leaves `+` and `&` unescaped and would corrupt a value containing
+    /// either (a scope string with a literal `+`, or a code value that happens
+    /// to contain `&`).
+    static func formEncode(_ fields: [String: String]) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return fields
+            .sorted { $0.key < $1.key }
+            .map { key, value in
+                let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+                return "\(encodedKey)=\(encodedValue)"
+            }
+            .joined(separator: "&")
+    }
+
     /// Sends a request and returns the status, raw body AND the response
     /// WITHOUT collapsing a non-2xx status into the coarse
     /// `ProviderFetchError` taxonomy `send` uses — for the rare caller that

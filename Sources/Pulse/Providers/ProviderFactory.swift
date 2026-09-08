@@ -10,7 +10,14 @@ enum ProviderFactory {
     ///   distinguished by uuid, so one store instance is enough, and sharing
     ///   it is what lets Settings sign in through the same object every
     ///   `ClaudeProvider` reads from.
-    static func makeAll(captureTitles: Bool = true, pulseOAuthStore: PulseOAuthStore = PulseOAuthStore()) -> [any UsageProvider] {
+    /// - Parameter codexOAuthStore: JSB-9's Codex equivalent — shared with
+    ///   Settings the same way, so a Codex sign-in updates the same object
+    ///   `CodexProvider` reads from.
+    static func makeAll(
+        captureTitles: Bool = true,
+        pulseOAuthStore: PulseOAuthStore = PulseOAuthStore(),
+        codexOAuthStore: CodexOAuthStore = CodexOAuthStore()
+    ) -> [any UsageProvider] {
         // Claude accounts are discovered from ~/.claude* at launch, so the
         // registry has to learn about them before anything reads allCases
         // (tab order, settings, menu bar).
@@ -19,7 +26,7 @@ enum ProviderFactory {
 
         return accounts.map { ClaudeProvider(account: $0, pulseOAuthStore: pulseOAuthStore, captureTitles: captureTitles) }
             + [
-                CodexProvider(),
+                CodexProvider(codexOAuthStore: codexOAuthStore),
                 CursorProvider(),
                 CopilotProvider(),
                 GeminiProvider(),

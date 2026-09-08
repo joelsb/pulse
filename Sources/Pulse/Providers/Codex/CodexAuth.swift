@@ -17,6 +17,21 @@ struct CodexAuth: Sendable {
     var idToken: String?
     /// Sent as the `ChatGPT-Account-Id` header.
     var accountID: String?
+    /// Epoch MILLISECONDS, matching `ClaudeCredentials.expiresAt`'s convention
+    /// — JSB-9: nil for `~/.codex/auth.json` (that file carries no expiry
+    /// field of its own; `load` derives one from the access token's JWT `exp`
+    /// claim, seconds × 1000) and populated directly from jcode/pi's own
+    /// millisecond fields when a candidate comes from one of those stores
+    /// instead (see `CodexCredentialSources.swift`).
+    var expiresAt: Double? = nil
+
+    /// `expiresAt` is epoch milliseconds; nil never expires (matches
+    /// `ClaudeCredentials.isExpired` — an absent expiry is not evidence of
+    /// staleness, only of a source that doesn't report one).
+    func isExpired(now: Date = .now) -> Bool {
+        guard let expiresAt else { return false }
+        return now.timeIntervalSince1970 * 1000 >= expiresAt
+    }
 
     static var defaultFileURL: URL {
         AppPaths.home.appendingPathComponent(".codex/auth.json")
@@ -48,8 +63,26 @@ struct CodexAuth: Sendable {
             authMode: file.authMode,
             accessToken: accessToken,
             idToken: file.tokens?.idToken,
-            accountID: file.tokens?.accountID
+            accountID: file.tokens?.accountID,
+            // No literal expiry field in this file — derived from the token
+            // itself, preferring the id_token (present whenever it's a real
+            // ChatGPT login) and falling back to the access token.
+            expiresAt: Self.expiresAt(idToken: file.tokens?.idToken, accessToken: accessToken)
         )
+    }
+
+    /// JWT `exp` is epoch SECONDS (RFC 7519 §4.1.4); converted × 1000 to match
+    /// this type's own millisecond convention. `JSONSerialization` decodes a
+    /// bare JSON number as `NSNumber`, which bridges to both `Int` and
+    /// `Double` — tried in that order since `as? Double` on an `NSNumber`
+    /// holding an integer value succeeds in practice but the `Int` path is
+    /// kept as the primary, unambiguous case.
+    static func expiresAt(idToken: String?, accessToken: String?) -> Double? {
+        for token in [idToken, accessToken].compactMap({ $0 }) {
+            if let seconds = JWT.claim("exp", of: token, as: Int.self) { return Double(seconds) * 1000 }
+            if let seconds = JWT.claim("exp", of: token, as: Double.self) { return seconds * 1000 }
+        }
+        return nil
     }
 
     // MARK: - JWT-derived account info
