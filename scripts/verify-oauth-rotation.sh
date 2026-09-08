@@ -41,6 +41,20 @@
 # Scenario 7 calls the real static function directly, and the
 # `invalid-grant-match-too-loose` defect guards the string comparison itself.
 #
+# Round 4 (2026-09-08): the human's FIRST real sign-in 400'd. Every scenario
+# above exercises `refresh` (rotation); NONE ever built an `authorization_code`
+# exchange body - the exact path a real sign-in takes. That body was missing
+# `state`, which this endpoint requires despite RFC 6749 not listing it there
+# (proven twice: pi's own bundle, and this file's own live falsification run,
+# both send it and both 200). Scenario 9 calls the real, pure
+# `exchangeRequestBody` function directly; `missing-state-in-exchange` guards
+# it. Also added: scenario 10 (R2-S1's bounded-retry cap, previously
+# time-boxed) and scenario 11 (R2-S3's concurrent-rotation invariant,
+# likewise) - writing scenario 10 surfaced a real interaction bug between
+# R2-S1 and R2-S3 (the fingerprint guard was blocking R2-S1's own legitimate
+# retries), fixed in the same commit; see `PulseOAuthStore.rotate`'s comment
+# on `spentRefreshFingerprints.insert`.
+#
 # This runs against the REAL Keychain, using scratch account names
 # (`harness-scratch-...`) that are never read by production code and are
 # deleted at the end of every run, pass or fail.
@@ -192,6 +206,19 @@ run_case() {
         'errorField.trimmingCharacters(in: .whitespaces).lowercased() == "invalid_grant"' \
         '!errorField.isEmpty'
       ;;
+    missing-state-in-exchange)
+      # Round 4 regression: the human's FIRST real sign-in 400'd because
+      # `state` was missing from the code-exchange body - RFC 6749 doesn't
+      # require it here, but this endpoint does, proven live twice (pi's
+      # bundle, this file's own falsification run). Removing it silently
+      # breaks every real sign-in with no explanation in the response.
+      swap "$dir/ClaudeOAuthClient.swift" \
+'            "code": code,
+            "state": state,
+            "client_id": clientID,' \
+'            "code": code,
+            "client_id": clientID,'
+      ;;
     return-unverified-pair)
       # B2 regression: hands the caller a pair that failed verification,
       # instead of keeping it durable in -pending and throwing so the caller
@@ -281,6 +308,7 @@ run_case "B1 regressed: a dead grant is never marked or cleared" no-dead-grant-d
 run_case "B1 too broad: any 400 marked dead, not just invalid_grant" dead-grant-too-broad  || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "R2-B1 regressed: unpromoted pending served without verifying" serve-unpromoted-pending-unverified || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "R2-B2 regressed: invalid_grant match loosened to any error"   invalid-grant-match-too-loose      || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "round 4 regressed: state missing from the exchange body"      missing-state-in-exchange          || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then

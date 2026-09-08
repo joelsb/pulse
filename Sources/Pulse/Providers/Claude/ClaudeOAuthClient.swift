@@ -158,6 +158,16 @@ struct ClaudeOAuthClient: Sendable {
     static func authorizeURL(pkce: PKCE) -> URL {
         var components = URLComponents(url: authorizeEndpoint, resolvingAgainstBaseURL: false)!
         components.queryItems = [
+            // Sent by BOTH proven-working callers as the first query item: pi's
+            // own bundle (`anthropic.js`) and the live falsification run that
+            // returned 200 on 2026-09-08. Not derived from or explained by
+            // RFC 6749 — kept anyway, on evidence rather than tidiness: the
+            // bar for omitting a parameter two working implementations both
+            // send is proof it is inert, not a hunch that it looks redundant.
+            // The `state`-in-token-request fix below (`exchangeRequestBody`)
+            // is the same lesson learned the hard way — a spec-correct
+            // reading of this endpoint failed on the first real sign-in.
+            URLQueryItem(name: "code", value: "true"),
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "client_id", value: clientID),
             URLQueryItem(name: "redirect_uri", value: redirectURI),
@@ -185,7 +195,13 @@ struct ClaudeOAuthClient: Sendable {
         openBrowser(Self.authorizeURL(pkce: pkce))
         let result = try await callback
         let code = try Self.acceptCallback(result, pkce: pkce)
-        let tokens = try await exchange(code: code, verifier: pkce.verifier)
+        // `result.state`, not `pkce.state`: the value that already PASSED
+        // `acceptCallback`'s check, so the parameter sent to the token
+        // endpoint and the guard that validated it can never drift apart even
+        // if the two are edited separately later. The two are equal at this
+        // point by construction — `acceptCallback` would have thrown otherwise
+        // — but using the checked value, not re-deriving it, is the point.
+        let tokens = try await exchange(code: code, state: result.state, verifier: pkce.verifier)
         let profile = try await fetchProfile(accessToken: tokens.accessToken)
         return (tokens, profile)
     }
@@ -200,21 +216,37 @@ struct ClaudeOAuthClient: Sendable {
     /// itself and would both stay green if this guard were deleted.
     static func acceptCallback(_ callback: LoopbackCallbackListener.Callback, pkce: PKCE) throws -> String {
         guard callback.state == pkce.state else {
-            throw ProviderFetchError.parsing(description: "OAuth callback state did not match — discarding it")
+            throw ProviderFetchError.parsing(description: "OAuth callback state did not match - discarding it")
         }
         return callback.code
     }
 
     // MARK: - Token endpoint
 
-    private func exchange(code: String, verifier: String) async throws -> TokenPair {
-        try await post(body: [
+    private func exchange(code: String, state: String, verifier: String) async throws -> TokenPair {
+        try await post(body: Self.exchangeRequestBody(code: code, state: state, verifier: verifier))
+    }
+
+    /// Pure (tested), because this exact shape failed silently once. RFC 6749
+    /// has NO `state` in the token request — it is nominally an
+    /// authorize-time parameter that comes back on the redirect, and a
+    /// spec-correct implementation omits it here. This endpoint requires it
+    /// anyway: the first real human sign-in (2026-09-08) sent the RFC-correct
+    /// five fields and got a bare `400` with no explanation. Two INDEPENDENT
+    /// working implementations both send it: pi's own bundle
+    /// (`anthropic.js`), verbatim `grant_type, client_id, code, state,
+    /// redirect_uri, code_verifier`; and this file's own live falsification
+    /// run, which sent it and got 200. Do NOT remove `state` to "match the
+    /// RFC" — that is the exact mistake that shipped.
+    static func exchangeRequestBody(code: String, state: String, verifier: String) -> [String: String] {
+        [
             "grant_type": "authorization_code",
             "code": code,
-            "client_id": Self.clientID,
-            "redirect_uri": Self.redirectURI,
+            "state": state,
+            "client_id": clientID,
+            "redirect_uri": redirectURI,
             "code_verifier": verifier,
-        ])
+        ]
     }
 
     /// Refreshes a grant. **One-shot**: the refresh token this call sends is

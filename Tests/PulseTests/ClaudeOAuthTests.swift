@@ -62,6 +62,10 @@ struct ClaudeOAuthAuthorizeURLTests {
         #expect(value("state") == "s")
         #expect(value("client_id") == ClaudeOAuthClient.clientID)
         #expect(value("redirect_uri") == ClaudeOAuthClient.redirectURI)
+        // Sent by both proven-working callers as the first query item (round
+        // 4 fix) - not explained by the RFC, kept on evidence, see the
+        // constant's own doc comment for why deviating needs proof not tidiness.
+        #expect(value("code") == "true")
         // Asserts AGREEMENT between the two constants, not the literal against
         // itself (review round 1, S4): `redirectURI` is derived from
         // `redirectPort`, so a bug that lets them drift independently again
@@ -94,6 +98,37 @@ struct ClaudeOAuthAcceptCallbackTests {
         #expect(throws: (any Error).self) {
             try ClaudeOAuthClient.acceptCallback(callback, pkce: pkce)
         }
+    }
+}
+
+@Suite("ClaudeOAuthClient code-exchange request body")
+struct ClaudeOAuthExchangeRequestBodyTests {
+    // Round 4: the human's first real sign-in 400'd because `state` was
+    // missing from this exact body - RFC 6749 doesn't list it here (it's
+    // nominally authorize-time-only), so a spec-correct implementation omits
+    // it, and this endpoint requires it anyway. Two independently working
+    // implementations (pi's bundle, this file's own live falsification run)
+    // both send it. This is the test that would have caught the missing
+    // field before a human ever saw "Sign-in failed 400" - every prior round
+    // exercised `refresh`, never `authorization_code`.
+    @Test func containsAllSixKeysIncludingState() {
+        let body = ClaudeOAuthClient.exchangeRequestBody(code: "the-code", state: "the-state", verifier: "the-verifier")
+        #expect(body == [
+            "grant_type": "authorization_code",
+            "code": "the-code",
+            "state": "the-state",
+            "client_id": ClaudeOAuthClient.clientID,
+            "redirect_uri": ClaudeOAuthClient.redirectURI,
+            "code_verifier": "the-verifier",
+        ])
+    }
+
+    @Test func stateEqualsWhateverWasPassedIn() {
+        // Not re-derived from a PKCE value here - `signIn` passes the exact
+        // `state` that already passed `acceptCallback`'s check, and this test
+        // only needs to prove the body carries whatever it was given verbatim.
+        let body = ClaudeOAuthClient.exchangeRequestBody(code: "c", state: "exact-callback-state", verifier: "v")
+        #expect(body["state"] == "exact-callback-state")
     }
 }
 

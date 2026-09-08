@@ -38,15 +38,15 @@ enum ProviderFetchError: Error, Sendable, Equatable {
         // entire 46 minutes and be wrong for all but the first second of it.
         case .rateLimited(let retryAfter):
             if let retryAfter, retryAfter > 0 {
-                "Rate limited by the provider — retrying at "
+                "Rate limited by the provider - retrying at "
                     + Formatters.clockTime(Date(timeIntervalSinceNow: retryAfter))
             } else {
-                "Rate limited by the provider — retrying later"
+                "Rate limited by the provider - retrying later"
             }
-        case .http(429): "Rate limited by the provider — retrying later"
+        case .http(429): "Rate limited by the provider - retrying later"
         case .http(let status) where status >= 500: "Provider is having trouble (\(status))"
         case .http(let status): "Service error (\(status))"
-        case .unauthorized: "Session expired — sign in again"
+        case .unauthorized: "Session expired - sign in again"
         case .parsing: "Unexpected data from provider"
         case .dataUnavailable(let description): description
         }

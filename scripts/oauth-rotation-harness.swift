@@ -370,6 +370,107 @@ func runUnpromotedPendingScenario() async {
     checkEqual(primaryAfterFail?.accessToken, "OLD-AT-8", "scenario 8: a failed verification must NOT promote the bad pair into primary")
 }
 
+// ------------------------------------------------------------ Scenario 9 (round 4)
+// The human's FIRST real sign-in 400'd: `exchange`'s request body was
+// missing `state`, which RFC 6749 doesn't require here (it's nominally
+// authorize-time-only) but this endpoint does. Every prior round's 8
+// scenarios exercised `refresh` only - none ever built an
+// `authorization_code` exchange body, so the missing field shipped straight
+// through nine planted-defect runs and a green build into a real human's
+// first click. This calls the real, pure body-building function directly.
+
+func runExchangeRequestBodyScenario() {
+    let body = ClaudeOAuthClient.exchangeRequestBody(code: "the-code", state: "the-callback-state", verifier: "the-verifier")
+    checkEqual(body.count, 6, "scenario 9: the exchange body must carry exactly 6 fields")
+    checkEqual(body["state"], "the-callback-state", "scenario 9: the exchange body's state must equal the value the callback returned")
+    checkEqual(body["grant_type"], "authorization_code", "scenario 9: grant_type must be authorization_code")
+    checkEqual(body["code"], "the-code", "scenario 9: code must be carried through unchanged")
+    checkEqual(body["client_id"], ClaudeOAuthClient.clientID, "scenario 9: client_id must be present")
+    checkEqual(body["redirect_uri"], ClaudeOAuthClient.redirectURI, "scenario 9: redirect_uri must be present")
+    checkEqual(body["code_verifier"], "the-verifier", "scenario 9: code_verifier must be present")
+}
+
+// ------------------------------------------------------------ Scenario 10 (R2-S1)
+// A refresh call failing for a reason OTHER than invalid_grant (a retired
+// client_id, a persistent 5xx - anything not proven permanent) must stop
+// being retried after a bounded number of attempts, not loop every tick
+// forever with the failure swallowed and no backoff.
+
+func runBoundedRefreshFailuresScenario() async {
+    let account = scratchAccount("bounded-failures")
+    // Kept inside the 300s refresh window for every call: a refresh that
+    // never succeeds never produces a fresher pair to stop the cycle on its
+    // own, so the cap has to be what stops it.
+    let stuck = pair(access: "AT-10", refresh: "RT-10", expiresIn: 60)
+    do { try await seed(account: account, tokens: stuck) } catch {
+        failures.append("scenario 10: seeding failed: \(error)")
+        return
+    }
+
+    struct PermanentButUnclassified: Error {}
+    let callCount = CountBox()
+    let store = PulseOAuthStore(refreshOverride: { _ in
+        callCount.increment()
+        throw PermanentButUnclassified()
+    })
+
+    for _ in 0..<10 {
+        _ = await store.credentials(forAccountUUID: account)
+    }
+    // maxConsecutiveRefreshFailures is 3, hardcoded here rather than read from
+    // the type (it's a private implementation constant) - a change to the cap
+    // is expected to update this assertion too.
+    checkEqual(callCount.value, 3, "scenario 10: a non-invalid_grant refresh failure must stop being retried after 3 consecutive attempts")
+
+    // Not deleted, not marked dead - just stopped asking this run.
+    let stillHasGrant = await store.hasGrant(forAccountUUID: account)
+    check(stillHasGrant, "scenario 10: a bounded-out refresh failure must NOT mark the grant dead")
+}
+
+// ------------------------------------------------------------ Scenario 11 (R2-S3)
+// N concurrent callers racing to rotate the SAME account must trigger
+// exactly ONE refresh call and end on exactly ONE consistent pair - whether
+// that invariant holds because coalescing caught every caller in time, or
+// because a straggler that slipped past coalescing was then refused by the
+// single-spend fingerprint guard, is not asserted directly (timing-dependent
+// and not worth pinning down); what matters, and IS asserted, is that the
+// account never ends up split, burned, or deleted by the race.
+
+func runConcurrentRotationScenario() async {
+    let account = scratchAccount("concurrent-rotation")
+    let old = pair(access: "OLD-AT-11", refresh: "OLD-RT-11", expiresIn: 60)
+    do { try await seed(account: account, tokens: old) } catch {
+        failures.append("scenario 11: seeding failed: \(error)")
+        return
+    }
+
+    let rotateCallCount = CountBox()
+    let store = PulseOAuthStore(
+        refreshOverride: { _ in
+            rotateCallCount.increment()
+            // Widens the window a coalescing gap would need to land in, so a
+            // real regression is far more likely to surface than with an
+            // instant return.
+            try? await Task.sleep(for: .milliseconds(50))
+            return pair(access: "ROTATED-AT-11", refresh: "ROTATED-RT-11", expiresIn: 28800)
+        },
+        verifyOverride: { _ in true }
+    )
+
+    async let r1 = store.credentials(forAccountUUID: account)
+    async let r2 = store.credentials(forAccountUUID: account)
+    async let r3 = store.credentials(forAccountUUID: account)
+    async let r4 = store.credentials(forAccountUUID: account)
+    async let r5 = store.credentials(forAccountUUID: account)
+    let results = await [r1, r2, r3, r4, r5]
+
+    checkEqual(rotateCallCount.value, 1, "scenario 11: 5 concurrent callers for the same account must trigger exactly ONE refresh call")
+    check(results.allSatisfy { $0 != nil }, "scenario 11: no concurrent caller should be starved of a usable pair")
+
+    let primaryAfter = await readItem(service: "de.byte.pulse.oauth", account: account)
+    checkEqual(primaryAfter?.accessToken, "ROTATED-AT-11", "scenario 11: the account must end up on the single rotated pair, never split, burned or deleted")
+}
+
 /// A locked counter, since the refresh override runs off-actor and Swift 6
 /// won't let a plain closure mutate a captured `var` across that boundary.
 final class CountBox: @unchecked Sendable {
@@ -398,6 +499,9 @@ Task {
     await runNonInvalidGrant400Scenario()
     runTokenEndpointErrorScenario()
     await runUnpromotedPendingScenario()
+    runExchangeRequestBodyScenario()
+    await runBoundedRefreshFailuresScenario()
+    await runConcurrentRotationScenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {

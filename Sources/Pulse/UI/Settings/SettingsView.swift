@@ -395,7 +395,7 @@ private struct ClaudeSignInButton: View {
             case .timeout: return "Timed out waiting for the browser"
             case .deniedByProvider: return "Sign-in was declined"
             case .invalidCallback: return "Unexpected sign-in response"
-            case .listenerFailed: return "Couldn’t open a local port—port 53810 busy?"
+            case .listenerFailed: return "Couldn’t open a local port - port 53810 busy?"
             }
         }
         return "Sign-in failed"

@@ -77,17 +77,30 @@ actor PulseOAuthStore {
     /// update with no re-sign-in needed, so nothing here is deleted.
     private var consecutiveRefreshFailures: [String: Int] = [:]
     private static let maxConsecutiveRefreshFailures = 3
-    /// Refuses to spend the same refresh token twice in one run (R2-S3).
-    /// Coalescing (`inFlightRotations`) only protects callers that overlap
-    /// IN TIME; a caller that read a pre-rotation `current` before a winner
-    /// started, but only reaches `rotateCoalesced` after the winner's entry
-    /// was already cleared, is sequential, not concurrent, and coalescing
-    /// does not see it. That caller would resend an already-spent refresh
-    /// token, get `invalid_grant`, and (after B1) delete the Keychain items
-    /// holding the pair the winner just promoted — turning a burned-grant
-    /// bug into a working-grant DELETION. Keyed on a fingerprint
-    /// (`PiAccountResolver.fingerprint`, the repo's existing token-identity-
-    /// without-the-token pattern), never the token itself.
+    /// Refuses to ATTEMPT a refresh token this run already proved SUCCEEDED
+    /// once (R2-S3). Coalescing (`inFlightRotations`) only protects callers
+    /// that overlap IN TIME; a caller that read a pre-rotation `current`
+    /// before a winner started, but only reaches `rotateCoalesced` after the
+    /// winner's entry was already cleared, is sequential, not concurrent, and
+    /// coalescing does not see it. That caller would resend an
+    /// already-successfully-spent refresh token, get `invalid_grant`, and
+    /// (after B1) delete the Keychain items holding the pair the winner just
+    /// promoted — turning a burned-grant bug into a working-grant DELETION.
+    /// Keyed on a fingerprint (`PiAccountResolver.fingerprint`, the repo's
+    /// existing token-identity-without-the-token pattern), never the token
+    /// itself.
+    ///
+    /// **A fingerprint is recorded on SUCCESS, not on attempt** — found the
+    /// hard way (round 4): recording on every attempt meant a transiently
+    /// failing refresh (R2-S1's bounded-retry case) could never reach its
+    /// second attempt, because its own first, failed attempt had already
+    /// "spent" the token it never actually got to use. A refresh token is
+    /// burned server-side the moment the endpoint answers 200 (see the ADR's
+    /// "What forced it"), not the moment Pulse merely tries — so "spent"
+    /// belongs on success. This still closes the R2-S3 gap: that gap needs a
+    /// PRIOR call to have already SUCCEEDED, which is exactly what gets
+    /// recorded, and coalescing already rules out two concurrent successes
+    /// racing for the same account.
     private var spentRefreshFingerprints: Set<String> = []
 
     init(
@@ -250,14 +263,15 @@ actor PulseOAuthStore {
     /// exactly the window `-pending` exists to cover. See
     /// `docs/adr/0001-refresh-token-rotation-write-order.md`.
     private func rotate(accountUUID: String, current: Credentials) async throws -> Credentials {
-        // R2-S3: refuses to spend the SAME refresh token twice this run,
-        // closing the one gap coalescing (`inFlightRotations`) cannot: a
-        // caller that read `current` before a winner started, but only
+        // R2-S3: refuses to ATTEMPT a refresh token this run already proved
+        // spent — closing the one gap coalescing (`inFlightRotations`) cannot:
+        // a caller that read `current` before a winner started, but only
         // reaches this call after the winner's in-flight entry was already
         // cleared, is sequential rather than concurrent — invisible to
-        // `rotateCoalesced`. Fingerprinted BEFORE the network call, so this
-        // check fires even if the call itself never runs.
-        guard spentRefreshFingerprints.insert(PiAccountResolver.fingerprint(current.refreshToken)).inserted else {
+        // `rotateCoalesced`. Checked here, BEFORE the network call, but NOT
+        // inserted yet — see the fix below for why.
+        let fingerprint = PiAccountResolver.fingerprint(current.refreshToken)
+        guard !spentRefreshFingerprints.contains(fingerprint) else {
             throw ProviderFetchError.dataUnavailable(description: "refresh token already spent this run")
         }
 
@@ -298,6 +312,25 @@ actor PulseOAuthStore {
             }
             throw error
         }
+        // Marked spent HERE — on SUCCESS, not on attempt — not where the
+        // original R2-S3 fix put it. Found the hard way, one bounded-retry
+        // scenario after shipping the round-2 version: inserting on every
+        // ATTEMPT (including a failed one) meant a transient failure's very
+        // next retry, using the SAME unrotated `current.refreshToken`, was
+        // refused by this store's OWN prior attempt — R2-S1's bounded retry
+        // could never reach its second attempt, because the fingerprint guard
+        // fired first. The ADR's own model ("What forced it") already states
+        // the truth: the refresh token is burned the MOMENT the endpoint
+        // answers 200, regardless of what verification decides afterward — so
+        // "spent" belongs exactly here, on success, not on "we tried". A
+        // failed attempt never touched the server's copy of this token, so it
+        // must remain retryable. This still closes the R2-S3 gap: the ONE
+        // path that gap depends on is a caller reusing a token ANOTHER call
+        // already rotated SUCCESSFULLY — which is exactly what gets recorded
+        // here, and coalescing (`inFlightRotations`) already rules out two
+        // concurrent successes for the same account racing each other to this
+        // line.
+        spentRefreshFingerprints.insert(fingerprint)
         // The refresh call itself succeeded, so whatever streak of failures
         // this account had is over — regardless of what verification below
         // decides.

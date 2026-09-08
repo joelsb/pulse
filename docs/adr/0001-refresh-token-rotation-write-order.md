@@ -220,9 +220,27 @@ fix above — delete the Keychain items holding the pair the winner had just
 promoted: a burned-grant bug turned into a working-grant DELETION. Closed with
 the repo's own fingerprint-not-token pattern (`PiAccountResolver.fingerprint`,
 reused rather than re-implemented): `spentRefreshFingerprints` records every
-refresh token `rotate` has attempted to spend THIS run, checked and inserted
-before the network call, so a second attempt with the same token — concurrent
-or sequential — is refused before it ever reaches the endpoint.
+refresh token a rotation has SUCCESSFULLY spent this run, so a second attempt
+with an already-succeeded token — concurrent or sequential — is refused before
+it ever reaches the endpoint.
+
+**Recorded on SUCCESS, not on attempt (round 4).** The first version of this
+fix inserted the fingerprint BEFORE the network call, on every attempt — which
+seemed the more conservative choice, but broke the very next fix that shipped
+in the same round: a refresh call that fails for a reason OTHER than
+`invalid_grant` (R2-S1's bounded-retry case, "Only `invalid_grant` is terminal"
+above) needs to retry with the SAME `current.refreshToken`, since a failed
+attempt never actually reached the server successfully. Marking-on-attempt
+refused that retry after its first (failed) try, capping every non-`invalid_grant`
+failure at exactly ONE attempt regardless of `maxConsecutiveRefreshFailures` —
+found by writing R2-S1's own harness scenario, not by inspection. The refresh
+token is burned server-side the moment the endpoint answers 200 ("What forced
+it", above), not the moment Pulse merely tries, so marking spent on SUCCESS is
+both the fix and, in hindsight, the semantically correct place for it to have
+been from the start. It still closes the R2-S3 gap: that gap specifically
+needs a PRIOR call to have already SUCCEEDED before the sequential straggler
+arrives, which is exactly the event this now records, and coalescing already
+rules out two concurrent successes racing for the same account.
 
 ## Consequences
 
@@ -297,3 +315,14 @@ or sequential — is refused before it ever reaches the endpoint.
   after review round 2 found the shell harness only ever threw
   already-classified values and so never ran the classifier itself
   (`invalid-grant-match-too-loose` defect).
+- Round 4 (2026-09-08): a real human sign-in `400`'d on the FIRST attempt,
+  because every prior scenario exercised `refresh` and none ever built an
+  `authorization_code` exchange request — the actual path a sign-in takes.
+  Scenario 9 calls `ClaudeOAuthClient.exchangeRequestBody` directly and the
+  `missing-state-in-exchange` defect guards it. Scenarios 10 and 11 give
+  R2-S1 (bounded retry) and R2-S3 (concurrent rotation) the harness coverage
+  both were time-boxed out of in review round 2; writing scenario 10 is what
+  surfaced the fingerprint-timing bug described above — an eval that plants
+  defects earns its cost by also catching regressions its own author
+  introduces while adding the NEXT scenario, not just the ones a reviewer
+  named.
