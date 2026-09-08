@@ -46,6 +46,10 @@ struct ProviderRecord: Sendable {
     var isActiveRecently: Bool {
         guard let snapshot else { return false }
         if let primary = snapshot.primary, primary.utilization > 0 { return true }
+        // Primary-only hid accounts whose 5-hour session just reset but whose
+        // weekly window still shows real use (e.g. Codex with providerLogs off,
+        // where dailyUsage is empty too) — check secondary before giving up.
+        if let secondary = snapshot.secondary, secondary.utilization > 0 { return true }
         return snapshot.dailyUsage.contains { $0.totals.total > 0 }
     }
 }

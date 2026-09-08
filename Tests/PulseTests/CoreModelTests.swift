@@ -417,6 +417,23 @@ struct ProviderRecordActivityTests {
         record.snapshot = usedThisWeek
         #expect(record.isActiveRecently)
     }
+
+    @Test func secondaryWindowCountsWhenPrimaryAndDailyUsageAreEmpty() {
+        // Codex with providerLogs off: primary reset to 0, dailyUsage empty,
+        // but the weekly (secondary) window still shows real use.
+        var record = ProviderRecord()
+        var weeklyOnly = UsageSnapshot(providerID: .codex)
+        weeklyOnly.primary = LimitWindow(id: "five_hour", title: "5h", systemImage: "clock", utilization: 0)
+        weeklyOnly.secondary = LimitWindow(id: "weekly", title: "Weekly", systemImage: "calendar", utilization: 0.01)
+        record.snapshot = weeklyOnly
+        #expect(record.isActiveRecently)
+
+        var allZero = UsageSnapshot(providerID: .codex)
+        allZero.primary = LimitWindow(id: "five_hour", title: "5h", systemImage: "clock", utilization: 0)
+        allZero.secondary = LimitWindow(id: "weekly", title: "Weekly", systemImage: "calendar", utilization: 0)
+        record.snapshot = allZero
+        #expect(!record.isActiveRecently)
+    }
 }
 
 @Suite("LimitWindow")
