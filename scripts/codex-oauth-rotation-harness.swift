@@ -331,6 +331,27 @@ func runBoundedRefreshFailuresScenario() async {
 
     let stillHasGrant = await store.hasGrant()
     check(stillHasGrant, "scenario 10: a bounded-out refresh failure must NOT mark the grant dead")
+
+    // Review B2: the stalled state must be OBSERVABLE from outside the store,
+    // not just internally bounded.
+    check(await store.refreshStalled(), "scenario 10: refreshStalled() must report true once the bounded retry cap is hit")
+
+    // A SEPARATE grant, already expired, hitting the same cap: hasGrant()
+    // must flip to false once BOTH are true (stalled AND actually expired) -
+    // the exact B2 gap. The first half above only proves it, correctly,
+    // stays true while the access token is still technically valid.
+    let expiredAccount = scratchAccount("bounded-failures-expired")
+    let expiredPair = pair(access: "EXPIRED-AT-10", refresh: "EXPIRED-RT-10", expiresIn: -10)
+    do { try await seed(account: expiredAccount, tokens: expiredPair) } catch {
+        failures.append("scenario 10: seeding the expired half failed: \(error)")
+        return
+    }
+    let expiredStore = CodexOAuthStore(account: expiredAccount, refreshOverride: { _ in
+        throw PermanentButUnclassified()
+    })
+    for _ in 0..<3 { _ = await expiredStore.credentials() }
+    let stillReadsAsGrant = await expiredStore.hasGrant()
+    check(!stillReadsAsGrant, "scenario 10: once rotation is stalled AND the access token has actually expired, hasGrant() must report false (B2) - a stalled grant must not read as present forever")
 }
 
 // ------------------------------------------------------------ Scenario 11
@@ -486,6 +507,55 @@ func runOverLengthPayloadRejectedScenario() async {
     }
 }
 
+// ------------------------------------------------------------ Scenario 15
+// Review B1: a refresh response is spec-legal even when it omits
+// refresh_token and id_token (RFC 6749 §6; id_token_add_organizations is
+// authorize-only, never sent on refresh) - the real parser must accept that
+// shape, and CodexOAuthStore.rotate must KEEP the old refresh token and the
+// old accountID rather than dropping them. Every OTHER scenario in this file
+// injects `refreshOverride` with a hand-built TokenPair, so none of them
+// exercises `CodexOAuthClient.parseTokenResponse` on the rotation path at
+// all - this is the one that does, using the real static function, not a stub.
+
+func runMissingFieldsOnRefreshScenario() async {
+    let minimalRefreshBody = Data(#"{"access_token":"AT-15","expires_in":3600}"#.utf8)
+    guard let parsed = try? CodexOAuthClient.parseTokenResponse(minimalRefreshBody, requireIdentity: false) else {
+        failures.append("scenario 15: parseTokenResponse(requireIdentity: false) must accept a response missing refresh_token and id_token")
+        return
+    }
+    checkEqual(parsed.accessToken, "AT-15", "scenario 15: the access token must be carried through")
+    check(parsed.refreshToken.isEmpty, "scenario 15: a missing refresh_token must parse as empty, not throw")
+    check(parsed.idToken.isEmpty, "scenario 15: a missing id_token must parse as empty, not throw")
+
+    let account = scratchAccount("missing-fields-on-refresh")
+    let oldAccountID = "acct-old-15"
+    func base64URL(_ string: String) -> String {
+        Data(string.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+    let idTokenWithAccount = "\(base64URL(#"{"alg":"none"}"#)).\(base64URL(#"{"https://api.openai.com/auth":{"chatgpt_account_id":"\#(oldAccountID)"}}"#)).sig"
+    let old = CodexOAuthClient.TokenPair(
+        accessToken: "OLD-AT-15", refreshToken: "OLD-RT-15",
+        idToken: idTokenWithAccount, expiresAt: Date.now.addingTimeInterval(60)
+    )
+    do { try await seed(account: account, tokens: old) } catch {
+        failures.append("scenario 15: seeding failed: \(error)")
+        return
+    }
+
+    let store = CodexOAuthStore(
+        account: account,
+        refreshOverride: { _ in try CodexOAuthClient.parseTokenResponse(minimalRefreshBody, requireIdentity: false) },
+        verifyOverride: { _ in true }
+    )
+    let result = await store.credentials()
+    checkEqual(result?.accessToken, "AT-15", "scenario 15: the rotated access token must be used")
+    checkEqual(result?.refreshToken, "OLD-RT-15", "scenario 15: a refresh response missing refresh_token must KEEP the old one, not drop it")
+    checkEqual(result?.accountID, oldAccountID, "scenario 15: a refresh response missing id_token must KEEP the old accountID, not drop it")
+}
+
 final class CountBox: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -516,6 +586,7 @@ Task {
     await runRealisticLengthPayloadScenario()
     await runIDTokenNeverPersistedScenario()
     await runOverLengthPayloadRejectedScenario()
+    await runMissingFieldsOnRefreshScenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {

@@ -107,19 +107,19 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
         return candidates
     }
 
-    private func fetchUsage(candidates: [Candidate]) async -> (response: CodexUsageResponse?, winner: CodexAuth?, error: ProviderFetchError?) {
-        guard let first = candidates.first else { return (nil, nil, nil) }
+    private func fetchUsage(candidates: [Candidate]) async -> (response: CodexUsageResponse?, winner: CodexAuth?, winnerSource: CredentialSource?, error: ProviderFetchError?) {
+        guard let first = candidates.first else { return (nil, nil, nil, nil) }
         do {
             let response = try await api.fetchUsage(auth: first.auth)
-            return (response, first.auth, nil)
+            return (response, first.auth, first.source, nil)
         } catch ProviderFetchError.unauthorized {
             let remaining = Array(candidates.dropFirst())
-            guard !remaining.isEmpty else { return (nil, first.auth, .unauthorized) }
+            guard !remaining.isEmpty else { return (nil, first.auth, first.source, .unauthorized) }
             return await fetchUsage(candidates: remaining)
         } catch let error as ProviderFetchError {
-            return (nil, first.auth, error)
+            return (nil, first.auth, first.source, error)
         } catch {
-            return (nil, first.auth, .network(description: "\(error)"))
+            return (nil, first.auth, first.source, .network(description: "\(error)"))
         }
     }
 
@@ -128,7 +128,7 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
         let candidates = await loadCandidates()
 
         async let reportTask = parser.report(now: now)
-        let (response, winnerAuth, limitsError) = await fetchUsage(candidates: candidates)
+        let (response, winnerAuth, winnerSource, limitsError) = await fetchUsage(candidates: candidates)
         let auth = winnerAuth ?? (try? CodexAuth.load(from: authFileURL))
         guard let auth else {
             throw limitsError ?? ProviderFetchError.notLoggedIn(hint: descriptor.setupHint)
@@ -175,10 +175,17 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
             snapshot.limitsError = limitsError
             snapshot.statusNotes.append("No rate-limit data: \(limitsError?.userMessage ?? "unavailable")")
         }
-        // A dead token must not hide behind stale session-log gauges.
+        // A dead token must not hide behind stale session-log gauges. Review
+        // B2: name the right cause — a stalled PULSE rotation needs a Pulse
+        // sign-in, and telling Joel to run the Codex CLI for that is actively
+        // wrong (the CLI cannot touch Pulse's own Keychain grant at all).
         switch limitsError {
         case .unauthorized, .notLoggedIn:
-            snapshot.statusNotes.append("Codex sign-in expired — run `codex` to refresh")
+            if winnerSource == .pulse, await codexOAuthStore.refreshStalled() {
+                snapshot.statusNotes.append("Pulse's Codex sign-in stopped refreshing — sign in again from Settings")
+            } else {
+                snapshot.statusNotes.append("Codex sign-in expired — run `codex` to refresh")
+            }
         default:
             break
         }

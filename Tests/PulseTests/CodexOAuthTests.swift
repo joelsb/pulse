@@ -20,6 +20,38 @@ private func fakeJWT(payload: String) -> String {
     "\(base64URL(#"{"alg":"none"}"#)).\(base64URL(payload)).sig"
 }
 
+// S3: `HTTPClient.formEncode` is the one new function every real Codex
+// sign-in depends on (the token endpoint is form-encoded, constraint 2), and
+// it had no test anywhere - a regression here (e.g. swapping the allowed
+// character set for `.urlQueryAllowed`, which leaves `+`/`&` unescaped) would
+// only surface as a live 400 on the token exchange that reads exactly like a
+// bad client, the same failure shape JSB-8 round 4 already paid for once.
+@Suite("HTTPClient.formEncode")
+struct HTTPClientFormEncodeTests {
+    @Test func encodesReservedCharactersInValues() {
+        #expect(HTTPClient.formEncode(["a": "one two"]) == "a=one%20two")
+        #expect(HTTPClient.formEncode(["a": "one+two"]) == "a=one%2Btwo")
+        #expect(HTTPClient.formEncode(["a": "one/two"]) == "a=one%2Ftwo")
+        #expect(HTTPClient.formEncode(["a": "one=two"]) == "a=one%3Dtwo")
+        #expect(HTTPClient.formEncode(["a": "one&two"]) == "a=one%26two")
+    }
+
+    @Test func leavesUnreservedCharactersAlone() {
+        #expect(HTTPClient.formEncode(["a": "AZaz09-._~"]) == "a=AZaz09-._~")
+    }
+
+    @Test func keysAreSortedForADeterministicBody() {
+        #expect(HTTPClient.formEncode(["b": "2", "a": "1", "c": "3"]) == "a=1&b=2&c=3")
+    }
+
+    @Test func roundTripsARealisticCodeVerifier() {
+        // A base64url PKCE verifier survives untouched - the exact value this
+        // encoder exists to carry through `CodexOAuthClient.exchangeRequestBody`.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        #expect(HTTPClient.formEncode(["code_verifier": verifier]) == "code_verifier=\(verifier)")
+    }
+}
+
 @Suite("CodexOAuthClient authorize URL")
 struct CodexOAuthAuthorizeURLTests {
     @Test func carriesTheRegisteredRedirectAndOrgFlag() {
@@ -162,17 +194,26 @@ struct CodexAuthExpiryTests {
     @Test func expiresAtDerivesFromExpClaimInSeconds() {
         // exp is seconds since epoch (RFC 7519); CodexAuth stores milliseconds.
         let token = fakeJWT(payload: #"{"exp":1800000000}"#)
+        #expect(CodexAuth.expiresAt(idToken: nil, accessToken: token) == 1_800_000_000_000)
+    }
+
+    @Test func fallsBackToIDTokenWhenNoAccessTokenExp() {
+        let token = fakeJWT(payload: #"{"exp":1800000000}"#)
         #expect(CodexAuth.expiresAt(idToken: token, accessToken: nil) == 1_800_000_000_000)
     }
 
-    @Test func fallsBackToAccessTokenWhenNoIDToken() {
-        let token = fakeJWT(payload: #"{"exp":1800000000}"#)
-        #expect(CodexAuth.expiresAt(idToken: nil, accessToken: token) == 1_800_000_000_000)
+    // S2: the ACCESS token's own exp wins when both are present and differ -
+    // it is the credential every request actually carries; the id_token's
+    // lifetime is unrelated and must never override it.
+    @Test func accessTokenExpWinsOverIDTokenWhenBothPresent() {
+        let accessToken = fakeJWT(payload: #"{"exp":1700000000}"#)
+        let idToken = fakeJWT(payload: #"{"exp":1800000000}"#)
+        #expect(CodexAuth.expiresAt(idToken: idToken, accessToken: accessToken) == 1_700_000_000_000)
     }
 
     @Test func missingExpClaimIsNil() {
         let token = fakeJWT(payload: "{}")
-        #expect(CodexAuth.expiresAt(idToken: token, accessToken: nil) == nil)
+        #expect(CodexAuth.expiresAt(idToken: nil, accessToken: token) == nil)
     }
 
     @Test func isExpiredHonoursDerivedExpiry() {

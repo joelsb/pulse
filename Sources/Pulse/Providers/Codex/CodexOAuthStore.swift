@@ -140,8 +140,23 @@ actor CodexOAuthStore {
 
     func hasGrant() async -> Bool {
         guard !dead else { return false }
-        return await read() != nil
+        guard let picked = await read() else { return false }
+        // Review B2: a grant whose rotation has given up (R2-S1's bounded
+        // retries exhausted) still reads as present while its access token
+        // is technically valid — correct, there is a real window before the
+        // next scheduled attempt where that is normal. But once that token
+        // ACTUALLY expires with rotation stalled, nothing will ever refresh
+        // it again this run: reading that as "has a grant" makes
+        // `probeConnection()` stay `.available` forever and hides a Pulse
+        // sign-in that Joel needs to redo behind a card that just goes quiet.
+        if refreshStalled(), picked.credentials.isExpired() { return false }
+        return true
     }
+
+    /// Whether rotation has stopped retrying this run (R2-S1's bounded cap) —
+    /// exposed so callers outside the store (`CodexProvider`) can name the
+    /// right cause instead of guessing from a generic 401/`notLoggedIn`.
+    func refreshStalled() -> Bool { consecutiveRefreshFailures >= Self.maxConsecutiveRefreshFailures }
 
     private func rotateCoalesced(current: Credentials) async -> Credentials? {
         if let inFlight = inFlightRotation { return await inFlight.value }
@@ -178,9 +193,31 @@ actor CodexOAuthStore {
             }
             throw error
         }
-        spentRefreshFingerprints.insert(fingerprint)
+        // Only mark THIS fingerprint spent when the endpoint actually handed
+        // back a DIFFERENT refresh token — an omitted or unchanged one (legal
+        // per RFC 6749 §6, see `CodexOAuthClient.refresh`'s doc comment)
+        // means the current refresh token is still alive and must remain
+        // usable on the NEXT rotation too. Marking it spent unconditionally
+        // here (the naive fix for B1) would permanently lock out every future
+        // rotation the moment OpenAI's endpoint chose not to rotate the
+        // refresh token, which is a legal, unremarkable response shape.
+        if !tokens.refreshToken.isEmpty, tokens.refreshToken != current.refreshToken {
+            spentRefreshFingerprints.insert(fingerprint)
+        }
         consecutiveRefreshFailures = 0
-        let rotated = Self.credentials(from: tokens)
+        // Review B1: merge into `current`, never replace it wholesale.
+        // `tokens.refreshToken`/`tokens.idToken` can legitimately be empty on
+        // a refresh response (see `CodexOAuthClient.refresh`'s doc comment) -
+        // an omitted refresh_token means "keep using the one you have"
+        // (RFC 6749 §6), and a refresh response carrying no id_token (or one
+        // without the account claim) must not erase an `accountID` the store
+        // already knows is good.
+        let rotated = Credentials(
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken.isEmpty ? current.refreshToken : tokens.refreshToken,
+            expiresAt: tokens.expiresAt,
+            accountID: CodexOAuthClient.accountID(fromIDToken: tokens.idToken) ?? current.accountID
+        )
         try await persist(rotated, service: Self.pendingService)
 
         guard await verifies(rotated) else {

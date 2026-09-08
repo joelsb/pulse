@@ -12,6 +12,13 @@ import Foundation
 /// pair that has not yet been proven to work — see
 /// `docs/adr/0001-refresh-token-rotation-write-order.md` for why that split
 /// exists and what it protects against.
+///
+/// **Forked, not shared, with `Providers/Codex/CodexOAuthStore.swift`** (JSB-9)
+/// - same pending → verify → promote invariants, same bounded-retry and
+/// spent-fingerprint shapes, deliberately duplicated rather than unified
+/// behind a generic store (see `docs/adr/0002-codex-oauth-differs-from-claude.md`'s
+/// "Consequences"). A change to the flow here likely needs the same change
+/// there.
 actor PulseOAuthStore {
     struct Credentials: Sendable, Equatable {
         var accessToken: String

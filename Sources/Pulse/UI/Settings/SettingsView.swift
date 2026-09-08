@@ -467,13 +467,16 @@ private struct CodexSignInButton: View {
         phase = .working
         Task {
             do {
-                _ = try await environment.codexOAuthStore.signIn { url in
+                let credentials = try await environment.codexOAuthStore.signIn { url in
                     NSWorkspace.shared.open(url)
                 }
-                // No email to show here: `CodexOAuthStore.Credentials` never
-                // holds the id_token past sign-in (constraint 7), and the
-                // masked-email claim lives in that token, not in accountID.
-                phase = .succeeded(email: nil)
+                // Review nit 3: the masked-email claim is NOT id_token-only -
+                // `CodexAuth.accountLabel` reads it off the access token too,
+                // which `Credentials` DOES keep (constraint 7 only forbids the
+                // id_token). No new persistence, no new data - just reading
+                // what is already returned.
+                let label = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID).accountLabel
+                phase = .succeeded(email: label)
                 environment.scheduler.refreshAll()
             } catch is CancellationError {
                 phase = .idle

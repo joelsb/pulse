@@ -47,6 +47,15 @@ struct CodexUsageAPI: Sendable {
 
     var http: HTTPClient
 
+    /// Review S1: uses `sendRaw`, not `get`/`send` — those collapse 401 AND
+    /// 403 alike into `.unauthorized` (`HTTPClient.send`), and on THIS host a
+    /// 403 is the documented Cloudflare challenge shape (see the type's own
+    /// doc comment above), not an auth failure. Reading a challenge as
+    /// "token rejected" makes `CodexProvider.fetchUsage` walk every remaining
+    /// candidate on the SAME account into the SAME challenge (up to four
+    /// requests to a challenge-serving edge in one tick), and makes
+    /// `CodexOAuthStore.verifies` fail a freshly rotated, perfectly good pair
+    /// for a reason that has nothing to do with the pair.
     func fetchUsage(auth: CodexAuth) async throws -> CodexUsageResponse {
         var headers: [String: String] = [
             "Authorization": "Bearer \(auth.accessToken)",
@@ -54,11 +63,45 @@ struct CodexUsageAPI: Sendable {
             "Accept": "application/json",
             "User-Agent": Self.userAgent,
         ]
-        if let accountID = auth.accountID, !accountID.isEmpty {
+        // Nit 4: `accountID` is a claim out of an UNVERIFIED JWT (no
+        // signature check, deliberately - see `CodexOAuthClient`'s doc
+        // comment). Unreachable today with real sources (a TLS response, or
+        // a local file the user's own CLI wrote), but `setValue` is not a
+        // validator, and a header value must never carry a newline (header
+        // injection) or non-ASCII the transport may mangle - a one-line
+        // guard here costs nothing.
+        if let accountID = auth.accountID, Self.isSafeHeaderValue(accountID) {
             headers["ChatGPT-Account-Id"] = accountID
         }
-        let data = try await http.get(Self.endpoint, headers: headers)
-        return try HTTPClient.decode(CodexUsageResponse.self, from: data)
+        let (status, data, response) = try await http.sendRaw(Self.request(headers: headers))
+        switch status {
+        case 200...299:
+            return try HTTPClient.decode(CodexUsageResponse.self, from: data)
+        case 401:
+            throw ProviderFetchError.unauthorized
+        case 403:
+            // Cloudflare challenge, NOT a rejected token — kept distinct from
+            // `.unauthorized` so the caller can stop instead of walking the
+            // rest of the fallback chain into the same wall.
+            throw ProviderFetchError.http(status: 403)
+        case 429:
+            throw ProviderFetchError.rateLimited(retryAfter: HTTPClient.retryAfter(from: response))
+        default:
+            throw ProviderFetchError.http(status: status)
+        }
+    }
+
+    /// Pure (tested by inspection, not a unit worth a Swift Testing suite of
+    /// its own): non-empty, ASCII, and no CR/LF.
+    private static func isSafeHeaderValue(_ value: String) -> Bool {
+        !value.isEmpty && value.allSatisfy { $0.isASCII && $0 != "\r" && $0 != "\n" }
+    }
+
+    private static func request(headers: [String: String]) -> URLRequest {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+        return request
     }
 
     /// Maps the response windows: primary → 5h session, secondary → weekly.

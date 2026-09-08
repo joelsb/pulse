@@ -112,7 +112,11 @@ struct CodexOAuthClient: Sendable {
     // MARK: - Token endpoint
 
     private func exchange(code: String, verifier: String) async throws -> TokenPair {
-        try await post(form: Self.exchangeRequestBody(code: code, verifier: verifier))
+        // Exchange is the ONE call whose response is required to carry a
+        // fresh refresh_token and id_token — there is no prior grant to fall
+        // back on yet. `refresh` below passes `requireIdentity: false`; see
+        // that function's doc comment for why.
+        try await post(form: Self.exchangeRequestBody(code: code, verifier: verifier), requireIdentity: true)
     }
 
     /// Pure (tested). Constraint 3: NO `state` here - do not copy Claude's
@@ -130,15 +134,29 @@ struct CodexOAuthClient: Sendable {
     /// One-shot, same rotation discipline as Claude's refresh - callers MUST
     /// durably store the result before doing anything else with it; see
     /// `CodexOAuthStore` / `docs/adr/0001-refresh-token-rotation-write-order.md`.
+    ///
+    /// **`requireIdentity: false`** (review B1): RFC 6749 §6 says a refresh
+    /// response MAY omit `refresh_token` — omitting it means "keep using the
+    /// one you already have", not "the grant is broken". `id_token` is the
+    /// same story one level further: `id_token_add_organizations=true` is an
+    /// AUTHORIZE-time parameter (see `authorizeURL`), never sent on refresh,
+    /// so there is no basis for assuming a refreshed id_token even carries
+    /// the `chatgpt_account_id` claim, let alone that the endpoint returns an
+    /// id_token on refresh at all. This repo's own second OAuth provider
+    /// already draws this line the same way — `GeminiAuth` requires only the
+    /// access token on refresh and treats `id_token` as optional. The FIRST
+    /// version of this function required all three fields on every call,
+    /// which meant a spec-legal refresh response missing either field
+    /// silently killed Pulse's own grant every single rotation.
     func refresh(refreshToken: String) async throws -> TokenPair {
         try await post(form: [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
             "client_id": Self.clientID,
-        ])
+        ], requireIdentity: false)
     }
 
-    private func post(form: [String: String]) async throws -> TokenPair {
+    private func post(form: [String: String], requireIdentity: Bool) async throws -> TokenPair {
         let headers = ["Accept": "application/json"]
         let (status, responseData, response) = try await http.postFormRaw(Self.tokenEndpoint, headers: headers, form: form)
         guard (200...299).contains(status) else {
@@ -147,7 +165,7 @@ struct CodexOAuthClient: Sendable {
             }
             throw Self.tokenEndpointError(status: status, body: responseData)
         }
-        return try Self.parseTokenResponse(responseData)
+        return try Self.parseTokenResponse(responseData, requireIdentity: requireIdentity)
     }
 
     /// Pure (tested) - same narrow, normalised match as
@@ -164,10 +182,15 @@ struct CodexOAuthClient: Sendable {
         return .invalidGrant
     }
 
-    /// Pure (tested). `id_token` is REQUIRED here (constraint 4) - unlike
-    /// Claude's token response, which has no id_token and needs a separate
-    /// `/oauth/profile` call instead.
-    static func parseTokenResponse(_ data: Data, now: Date = .now) throws -> TokenPair {
+    /// Pure (tested). `accessToken` is ALWAYS required — there is nothing
+    /// usable without it. `refreshToken`/`idToken` are required only when
+    /// `requireIdentity` is true (the EXCHANGE call, which mints a grant from
+    /// nothing); on `refresh` (`requireIdentity: false`) either may be absent
+    /// per RFC 6749 §6 and this endpoint's own authorize-vs-refresh parameter
+    /// scoping (see `refresh`'s doc comment) — a missing one comes back as
+    /// `""`, and `CodexOAuthStore.rotate` is the caller that knows how to
+    /// fall back to what it already has.
+    static func parseTokenResponse(_ data: Data, requireIdentity: Bool = true, now: Date = .now) throws -> TokenPair {
         struct Response: Decodable {
             var accessToken: String?
             var refreshToken: String?
@@ -181,16 +204,28 @@ struct CodexOAuthClient: Sendable {
             }
         }
         guard let response = try? JSONDecoder().decode(Response.self, from: data),
-              let accessToken = response.accessToken, !accessToken.isEmpty,
-              let refreshToken = response.refreshToken, !refreshToken.isEmpty,
-              let idToken = response.idToken, !idToken.isEmpty
+              let accessToken = response.accessToken, !accessToken.isEmpty
         else {
-            throw ProviderFetchError.parsing(description: "oauth/token: response carried no usable token pair")
+            throw ProviderFetchError.parsing(description: "oauth/token: response carried no usable access token")
+        }
+        if requireIdentity {
+            guard let refreshToken = response.refreshToken, !refreshToken.isEmpty,
+                  let idToken = response.idToken, !idToken.isEmpty
+            else {
+                throw ProviderFetchError.parsing(description: "oauth/token: exchange response carried no refresh_token/id_token")
+            }
+            return TokenPair(
+                accessToken: accessToken, refreshToken: refreshToken, idToken: idToken,
+                // 3600s (1h) is not a guess: this machine's own real
+                // `~/.codex/auth.json` id_token carries `iat` and `exp`
+                // 3600 seconds apart exactly (1787856354 -> 1787859954).
+                expiresAt: now.addingTimeInterval(response.expiresIn ?? 3600)
+            )
         }
         return TokenPair(
             accessToken: accessToken,
-            refreshToken: refreshToken,
-            idToken: idToken,
+            refreshToken: response.refreshToken ?? "",
+            idToken: response.idToken ?? "",
             expiresAt: now.addingTimeInterval(response.expiresIn ?? 3600)
         )
     }

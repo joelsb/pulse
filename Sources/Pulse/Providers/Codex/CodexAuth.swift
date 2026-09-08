@@ -64,9 +64,17 @@ struct CodexAuth: Sendable {
             accessToken: accessToken,
             idToken: file.tokens?.idToken,
             accountID: file.tokens?.accountID,
-            // No literal expiry field in this file — derived from the token
-            // itself, preferring the id_token (present whenever it's a real
-            // ChatGPT login) and falling back to the access token.
+            // No literal expiry field in this file - derived from the token
+            // itself. Review S2: the ACCESS token's own `exp` first, not the
+            // id_token's - it is the credential every request actually
+            // carries, and its lifetime routinely differs from the id_token's
+            // (an OIDC id_token commonly outlives the access token it shipped
+            // with). Reading the id_token's `exp` first meant a still-live
+            // access token could read as expired (dropped from the fallback
+            // chain with no error anywhere) or a dead one could read as fresh
+            // and get sent (breaking the intent's own "a token known to be
+            // expired is never sent") depending only on which claim happened
+            // to answer first - neither is what this field is supposed to mean.
             expiresAt: Self.expiresAt(idToken: file.tokens?.idToken, accessToken: accessToken)
         )
     }
@@ -76,9 +84,10 @@ struct CodexAuth: Sendable {
     /// bare JSON number as `NSNumber`, which bridges to both `Int` and
     /// `Double` — tried in that order since `as? Double` on an `NSNumber`
     /// holding an integer value succeeds in practice but the `Int` path is
-    /// kept as the primary, unambiguous case.
+    /// kept as the primary, unambiguous case. Access token first (S2) - the
+    /// id_token is only a fallback hint when there is no access token to ask.
     static func expiresAt(idToken: String?, accessToken: String?) -> Double? {
-        for token in [idToken, accessToken].compactMap({ $0 }) {
+        for token in [accessToken, idToken].compactMap({ $0 }) {
             if let seconds = JWT.claim("exp", of: token, as: Int.self) { return Double(seconds) * 1000 }
             if let seconds = JWT.claim("exp", of: token, as: Double.self) { return seconds * 1000 }
         }

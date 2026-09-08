@@ -207,17 +207,27 @@ struct KeychainWriter: Sendable {
     /// trailing value) this replaced silently capped every value at 128
     /// bytes.
     /// Measured safety threshold for the WHOLE composed `security -i`
-    /// command line — see the type's doc comment for the two measurements
-    /// (short vs. 105-characters-longer service name) this rests on. Kept
-    /// below the observed ~4,032/~3,924-byte truncation points, not at the
-    /// wall itself: a few bytes of drift in exactly how `security -i`
-    /// buffers its input is cheaper to lose as headroom than to rediscover
-    /// as a silent truncation. Codex's own payload (access + refresh tokens
-    /// plus a short derived account id, no id_token — see
-    /// `CodexOAuthStore`'s doc comment) base64-encodes to roughly 2,600
-    /// bytes against this ~4,000-byte budget: about 65% used, real headroom
-    /// left for the service/account names to grow before this threshold
-    /// would ever fire in production.
+    /// command line (`add-generic-password -U -a <account> -s <service> -w
+    /// <base64>`) — review S5: this is a LINE budget, not a payload budget,
+    /// and stating it as the latter invites raising the constant to 4032 and
+    /// putting a long-name write straight back inside the truncation zone.
+    /// The type's doc comment records two measurements: with a SHORT service
+    /// name, the STORED VALUE ceiling was ~4,032 bytes; with a service name
+    /// 105 characters longer, it dropped to ~3,924 — a difference of 108,
+    /// matching the longer name almost exactly. Those are two different
+    /// PREFIX lengths hitting the SAME underlying whole-line wall (roughly
+    /// 4,096 bytes), not two different payload caps. `maxCommandLineLength`
+    /// is checked against `command.utf8.count` below — the whole line,
+    /// prefix and payload together — which is why it stays safe at any
+    /// service/account name this code can produce: a longer name eats the
+    /// same budget the check measures, so it cannot slip a write past it.
+    /// 4,000 leaves roughly 70 bytes of headroom under the observed wall.
+    /// The longest line this code currently builds, with the real production
+    /// strings (`de.byte.pulse.codex-oauth-pending`, the longer of Codex's
+    /// two services, plus `codex-primary`, plus a 1,698-byte access token, a
+    /// 400-byte refresh token and a 36-byte account id): ~3,074 bytes, 77%
+    /// of this budget. The break-even where this guard would fire in
+    /// practice is a refresh token of roughly 1,100 characters.
     static let maxCommandLineLength = 4000
 
     private func runAdd(service: String, account: String, secret: String, timeout: TimeInterval) async throws {

@@ -163,6 +163,16 @@ run_case() {
         'let command = "add-generic-password -U -a \(account) -s \(service) -w \(Self.encode(secret))\n"' \
         'let command = "add-generic-password -U -a \(account) -s \(service) -w \(secret)\n"'
       ;;
+    require-identity-always)
+      # Review B1 regressed: `requireIdentity` stops gating anything, so a
+      # spec-legal refresh response missing refresh_token/id_token (RFC 6749
+      # §6) is rejected instead of accepted - exactly the bug that silently
+      # killed Pulse's own grant on the first real rotation OpenAI omitted
+      # either field on.
+      swap "$dir/CodexOAuthClient.swift" \
+        'if requireIdentity {' \
+        'if true {'
+      ;;
     no-line-length-guard)
       # The proactive guard is removed - a write whose composed command line
       # exceeds the measured budget is attempted anyway instead of refused
@@ -259,6 +269,7 @@ run_case "invalid_grant match loosened to any error"              invalid-grant-
 run_case "constraint 3 regressed: state added to the exchange body" state-added-to-exchange            || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "raw (unencoded) secret sent to security -i"              no-base64-encoding-on-write         || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "proactive line-length guard removed"                     no-line-length-guard                || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "review B1 regressed: refresh always requires identity fields" require-identity-always           || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then
