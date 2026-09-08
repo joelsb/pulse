@@ -384,6 +384,12 @@ private struct ClaudeSignInButton: View {
     /// path is a status code, a timeout, or a parse failure).
     private static func message(for error: Error) -> String {
         if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
+        if let tokenEndpointError = error as? ClaudeOAuthClient.TokenEndpointError {
+            switch tokenEndpointError {
+            case .invalidGrant: return "Sign-in was rejected—try again"
+            case .other(let status): return "Sign-in failed (\(status))"
+            }
+        }
         if let listenerFailure = error as? LoopbackCallbackListener.Failure {
             switch listenerFailure {
             case .timeout: return "Timed out waiting for the browser"

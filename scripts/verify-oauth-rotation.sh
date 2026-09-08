@@ -20,6 +20,14 @@
 # value, and adds two more defects (a regressed B2 fix, a regressed B1 dead-
 # grant fix) that only that assertion and the new dead-grant scenario can see.
 #
+# Review round 2 (2026-09-08) found the round-1 B1 fix itself too broad: it
+# marked a grant dead on ANY 400 from the refresh call, when the only real
+# "permanently dead" signal is a 400 whose body's `error` field is exactly
+# `invalid_grant`. Fixed in `ClaudeOAuthClient.TokenEndpointError`; this file
+# adds scenario 6 (a non-invalid_grant 400 must NOT delete a working grant)
+# and the `dead-grant-too-broad` defect to guard the distinction going
+# forward.
+#
 # This runs against the REAL Keychain, using scratch account names
 # (`harness-scratch-...`) that are never read by production code and are
 # deleted at the end of every run, pass or fail.
@@ -161,6 +169,14 @@ run_case() {
         'if Self.isDeadGrantError(error) {' \
         'if false {'
       ;;
+    dead-grant-too-broad)
+      # Review round 2 regression: marks ANY TokenEndpointError dead, not just
+      # invalid_grant specifically - the exact bug the round-2 fix corrected
+      # (a working grant destroyed by an unrelated 400).
+      swap "$dir/PulseOAuthStore.swift" \
+        '(error as? ClaudeOAuthClient.TokenEndpointError)?.isPermanentlyDead ?? false' \
+        '(error as? ClaudeOAuthClient.TokenEndpointError) != nil'
+      ;;
     *)
       echo "unknown defect: $defect"; exit 1
       ;;
@@ -223,6 +239,7 @@ run_case "pending write dropped entirely"                        no-pending-pers
 run_case "read prefers the staler item over the fresher one"     pending-not-preferred    || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "B2 regressed: unverified pair returned to the caller"  return-unverified-pair   || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "B1 regressed: a dead grant is never marked or cleared" no-dead-grant-detection  || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "B1 too broad: any 400 marked dead, not just invalid_grant" dead-grant-too-broad  || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then

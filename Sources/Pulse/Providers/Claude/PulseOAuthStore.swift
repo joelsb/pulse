@@ -193,14 +193,23 @@ actor PulseOAuthStore {
                 tokens = try await oauthClient.refresh(refreshToken: current.refreshToken)
             }
         } catch {
-            // B1: `400 invalid_grant` on the refresh call means the refresh
-            // token is PERMANENTLY dead (proven live, see the type's doc
-            // comment) — not a network blip a retry could fix. Left
-            // unmarked, every future tick would resend the same dead token to
-            // a Cloudflare-fronted endpoint forever: the exact
-            // self-renewing-penalty shape `intent.md` documents for
-            // `~/.claude`'s 429, reintroduced by the feature meant to end it.
-            // Marking it here, once, is what stops that loop.
+            // B1: `invalid_grant` on the refresh call means the refresh token
+            // is PERMANENTLY dead (proven live, see
+            // `ClaudeOAuthClient.TokenEndpointError`'s doc comment) — not a
+            // network blip a retry could fix. Left unmarked, every future
+            // tick would resend the same dead token to a Cloudflare-fronted
+            // endpoint forever: the exact self-renewing-penalty shape
+            // `intent.md` documents for `~/.claude`'s 429, reintroduced by
+            // the feature meant to end it. Marking it here, once, is what
+            // stops that loop.
+            //
+            // Keyed on `invalid_grant` SPECIFICALLY, not on "any 400" (review
+            // round 2, 2026-09-08): the first version matched
+            // `ProviderFetchError.http(400)`, which is what EVERY 400 from
+            // the refresh call produced (the status alone, body already
+            // discarded) — deleting a still-working grant's Keychain items on
+            // any 400 whatsoever, including one that has nothing to do with
+            // the grant being dead.
             if Self.isDeadGrantError(error) {
                 deadGrants.insert(accountUUID)
                 await clearGrant(accountUUID: accountUUID)
@@ -235,11 +244,13 @@ actor PulseOAuthStore {
     }
 
     /// A refresh-token rotation this dead cannot be retried into working —
-    /// only a human re-sign-in fixes `400 invalid_grant`. Anything else
-    /// (network, 429, 5xx) is transient and must NOT be marked dead.
+    /// only a human re-sign-in fixes `invalid_grant`. Every other outcome
+    /// (network, 429, 5xx, or a 400 that is NOT `invalid_grant`) is treated
+    /// as transient and must NOT be marked dead — `refreshOverride` in tests
+    /// throws plain `Error`s too, which fall through to `false` here exactly
+    /// like any other non-`invalidGrant` case would.
     private static func isDeadGrantError(_ error: Error) -> Bool {
-        if case ProviderFetchError.http(400) = error { return true }
-        return false
+        (error as? ClaudeOAuthClient.TokenEndpointError)?.isPermanentlyDead ?? false
     }
 
     /// The durable half of B1: deletes both Keychain items for `accountUUID`

@@ -95,6 +95,39 @@ struct ClaudeOAuthClient: Sendable {
         var state: String
     }
 
+    /// Distinguishes the ONE non-2xx response from the token endpoint that
+    /// means "this refresh token is permanently dead" from every other one.
+    /// Deliberately NOT folded into `ProviderFetchError` (the shared, coarse
+    /// taxonomy every provider maps into) — only `PulseOAuthStore`'s rotation
+    /// path needs the distinction, and widening the shared type would give
+    /// every OTHER caller a case they have no way to produce or handle.
+    ///
+    /// Found in review round 2 (2026-09-08): the first version keyed
+    /// "permanently dead" on ANY `400` from the refresh call
+    /// (`ProviderFetchError.http(400)`, which `HTTPClient.send` produces for
+    /// every 400 alike, having already discarded the body). That deleted a
+    /// WORKING grant's Keychain items on any 400 whatsoever — a malformed
+    /// body after a future API change, a changed required parameter, a
+    /// provider-side validation hiccup — none of which mean the refresh
+    /// token itself is dead. The real, narrow signal, verbatim from the
+    /// falsification run's response body on a genuinely reused (post-
+    /// rotation) refresh token:
+    /// ```
+    /// HTTP 400 {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}
+    /// ```
+    enum TokenEndpointError: Error, Sendable, Equatable {
+        /// `400` whose body's `error` field is exactly `"invalid_grant"`.
+        /// Permanent: only a human re-sign-in fixes it, retrying never will.
+        case invalidGrant
+        /// Any other non-2xx status. Status only — the body is read just far
+        /// enough to classify it and then discarded, never retained past this
+        /// call, matching the "never carry provider error text further than
+        /// it has to go" discipline the rest of this file follows.
+        case other(status: Int)
+
+        var isPermanentlyDead: Bool { self == .invalidGrant }
+    }
+
     // MARK: - PKCE (pure, tested)
 
     static func makePKCE() -> PKCE {
@@ -205,8 +238,29 @@ struct ClaudeOAuthClient: Sendable {
             "User-Agent": Self.userAgent,
             "Accept": "application/json",
         ]
-        let responseData = try await http.post(Self.tokenEndpoint, headers: headers, jsonBody: data)
+        // `postRaw`, not `post`: a non-2xx must still carry its BODY to the
+        // caller so `tokenEndpointError` can read the `error` field — `post`
+        // (via `HTTPClient.send`) collapses every 400 alike before the body
+        // is ever looked at, which is the exact mistake `TokenEndpointError`
+        // exists to undo. See that type's doc comment.
+        let (status, responseData) = try await http.postRaw(Self.tokenEndpoint, headers: headers, jsonBody: data)
+        guard (200...299).contains(status) else {
+            throw Self.tokenEndpointError(status: status, body: responseData)
+        }
         return try Self.parseTokenResponse(responseData)
+    }
+
+    /// Pure (tested): classifies a non-2xx token-endpoint response. Reads
+    /// ONLY the `error` field of the body — `error_description` and anything
+    /// else present is never retained.
+    static func tokenEndpointError(status: Int, body: Data) -> TokenEndpointError {
+        guard status == 400,
+              let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              (root["error"] as? String) == "invalid_grant"
+        else {
+            return .other(status: status)
+        }
+        return .invalidGrant
     }
 
     /// Pure (tested): decodes the token endpoint's JSON body. `expires_in` is

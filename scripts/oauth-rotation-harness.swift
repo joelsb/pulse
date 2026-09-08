@@ -189,9 +189,10 @@ func runNoRotationWhenFreshScenario() async {
 }
 
 // ------------------------------------------------------------ Scenario 5
-// B1: a refresh call that returns 400 (invalid_grant) is PERMANENT, never
-// retried, and its Keychain items are actually deleted, not just refused in
-// memory - so the account reads as "not connected" even after a relaunch.
+// B1: a refresh call that fails with `invalid_grant` SPECIFICALLY is
+// PERMANENT, never retried, and its Keychain items are actually deleted, not
+// just refused in memory - so the account reads as "not connected" even
+// after a relaunch.
 
 func runDeadGrantScenario() async {
     let account = scratchAccount("dead-grant")
@@ -204,12 +205,12 @@ func runDeadGrantScenario() async {
     let refreshCallCount = CountBox()
     let store = PulseOAuthStore(refreshOverride: { _ in
         refreshCallCount.increment()
-        throw ProviderFetchError.http(status: 400)
+        throw ClaudeOAuthClient.TokenEndpointError.invalidGrant
     })
 
     _ = await store.credentials(forAccountUUID: account)
     let deadAfterFirstCall = await !store.hasGrant(forAccountUUID: account)
-    check(deadAfterFirstCall, "scenario 5: hasGrant must report false once a 400 has been seen for this account")
+    check(deadAfterFirstCall, "scenario 5: hasGrant must report false once invalid_grant has been seen for this account")
 
     // Second call on the SAME store: must not call the refresh override
     // again (the account is already known dead), and must not resurrect a
@@ -230,6 +231,38 @@ func runDeadGrantScenario() async {
     let freshStore = PulseOAuthStore()
     let afterRelaunch = await freshStore.hasGrant(forAccountUUID: account)
     check(!afterRelaunch, "scenario 5: a fresh store after 'relaunch' must also read no grant for a dead account")
+}
+
+// ------------------------------------------------------------ Scenario 6
+// Review round 2 (2026-09-08): a 400 that is NOT invalid_grant (a malformed
+// body, a changed required parameter, a provider-side validation hiccup -
+// anything unrelated to the refresh token itself being dead) must NOT delete
+// the grant. This is the exact regression the first version of B1 had: it
+// keyed "permanently dead" on ANY 400, which would have destroyed a working
+// grant here.
+
+func runNonInvalidGrant400Scenario() async {
+    let account = scratchAccount("other-400")
+    let old = pair(access: "OLD-AT-6", refresh: "OLD-RT-6", expiresIn: 60)
+    do { try await seed(account: account, tokens: old) } catch {
+        failures.append("scenario 6: seeding failed: \(error)")
+        return
+    }
+
+    let store = PulseOAuthStore(refreshOverride: { _ in
+        throw ClaudeOAuthClient.TokenEndpointError.other(status: 400)
+    })
+
+    let result = await store.credentials(forAccountUUID: account)
+    checkEqual(result?.accessToken, "OLD-AT-6", "scenario 6: a non-invalid_grant 400 must still hand out the still-valid old pair")
+
+    let stillHasGrant = await store.hasGrant(forAccountUUID: account)
+    check(stillHasGrant, "scenario 6: a non-invalid_grant 400 must NOT mark the grant dead - hasGrant must stay true")
+
+    let primaryAfter = await readItem(service: "de.byte.pulse.oauth", account: account)
+    let pendingAfter = await readItem(service: "de.byte.pulse.oauth-pending", account: account)
+    check(primaryAfter?.accessToken == "OLD-AT-6", "scenario 6: a non-invalid_grant 400 must NOT delete the primary Keychain item")
+    check(pendingAfter?.accessToken == "OLD-AT-6", "scenario 6: a non-invalid_grant 400 must NOT delete the pending Keychain item")
 }
 
 /// A locked counter, since the refresh override runs off-actor and Swift 6
@@ -257,6 +290,7 @@ Task {
     await runRefreshFailureScenario()
     await runNoRotationWhenFreshScenario()
     await runDeadGrantScenario()
+    await runNonInvalidGrant400Scenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {
