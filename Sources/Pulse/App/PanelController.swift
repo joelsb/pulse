@@ -169,10 +169,28 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// A click on the status item arrives as TWO things: a mouse-DOWN seen by the
+    /// dismissal paths (global monitor / resign-key), and the button action on
+    /// mouse-UP. Without a guard the down closes the panel and the up reopens it,
+    /// which reads as a flicker. Both are suppressed while the pointer is over the
+    /// status item; this timestamp catches whatever still slips through (the panel
+    /// can resign key before the pointer test can run).
+    private var lastHideAt: TimeInterval = -.greatestFiniteMagnitude
+
+    /// Longer than the 0.14s out-animation, shorter than a deliberate re-open.
+    private static let reopenGuard: TimeInterval = 0.3
+
+    /// True while the pointer sits on the status item, in screen coordinates.
+    private var isMouseOverStatusItem: Bool {
+        guard let button = statusButton, let window = button.window else { return false }
+        let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
+        return NSMouseInRect(NSEvent.mouseLocation, rect, false)
+    }
+
     func toggle(relativeTo button: NSStatusBarButton) {
         if isPresented {
             hide()
-        } else {
+        } else if ProcessInfo.processInfo.systemUptime - lastHideAt > Self.reopenGuard {
             show(relativeTo: button)
         }
     }
@@ -235,6 +253,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     func hide() {
         guard isPresented, !isPinnedForDebug else { return }
         isPresented = false
+        lastHideAt = ProcessInfo.processInfo.systemUptime
         removeMonitors()
         statusButton?.highlight(false)
 
@@ -289,7 +308,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         removeMonitors()
         if let global = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown],
-            handler: { [weak self] _ in self?.hide() }
+            handler: { [weak self] _ in
+                guard let self, !self.isMouseOverStatusItem else { return }
+                self.hide()
+            }
         ) {
             monitors.append(global)
         }
@@ -317,7 +339,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard isPresented else { return }
+        guard isPresented, !isMouseOverStatusItem else { return }
         // Opening Settings (a regular window) legitimately takes key status.
         if NSApp.keyWindow == nil || NSApp.keyWindow === panel { hide() }
     }
