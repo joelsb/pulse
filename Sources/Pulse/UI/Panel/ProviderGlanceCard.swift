@@ -82,10 +82,33 @@ struct ProviderGlanceCard: View {
                 Divider().overlay(PulseColor.hairline.opacity(0.6))
                 weekly(barWindow)
             }
+
+            if record.isStale {
+                staleCaption(for: snapshot)
+            }
         }
         .opacity(record.isStale ? 0.6 : 1)
         .animation(Motion.staleTint, value: record.isStale)
         .frame(maxWidth: .infinity)
+    }
+
+    /// "43m old — Rate limited by the provider — retrying at 11:44 PM": the age
+    /// of the numbers actually on screen, plus why they stopped updating.
+    /// Age reads `limitsCapturedAt` (the last successful capture, carried
+    /// forward by `UsageStore.apply` through every failed attempt since), and
+    /// falls back to `record.lastSuccess` for providers that don't stamp it
+    /// — that field is bumped on the same "real success only" rule, so it is
+    /// never a claim to be fresher than reality.
+    private func staleCaption(for snapshot: UsageSnapshot) -> some View {
+        let capturedAt = snapshot.limitsCapturedAt ?? record.lastSuccess ?? snapshot.fetchedAt
+        let age = Date.now.timeIntervalSince(capturedAt)
+        let reason = record.lastError?.userMessage ?? "Limits unavailable"
+        return Text("\(Formatters.duration(age)) old — \(reason)")
+            .font(Typo.caption)
+            .foregroundStyle(PulseColor.warnStrong)
+            .lineLimit(2)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func ring(for window: LimitWindow) -> some View {

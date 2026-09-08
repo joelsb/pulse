@@ -277,6 +277,31 @@ struct UsageStoreResilienceTests {
         #expect(record.snapshot?.tokens != nil)
     }
 
+    // JSB-8: a carried-forward limits failure must stay visible on the
+    // record, not read back as a fresh success.
+    @Test func degradedLimitsStayStaleAndDoNotBumpFreshness() {
+        let store = UsageStore()
+        var healthy = snapshotWithGauge(.claude)
+        healthy.limitsCapturedAt = Date(timeIntervalSince1970: 1_000_000)
+        store.apply(healthy)
+
+        let firstSuccess = store.record(for: .claude).lastSuccess
+        #expect(firstSuccess != nil)
+        #expect(store.record(for: .claude).isStale == false)
+
+        var degraded = UsageSnapshot(providerID: .claude, fetchedAt: Date(timeIntervalSince1970: 2_000_000))
+        degraded.limitsUnavailable = true
+        degraded.limitsError = .rateLimited(retryAfter: 2808)
+
+        store.apply(degraded)
+        let record = store.record(for: .claude)
+
+        #expect(record.lastError == .rateLimited(retryAfter: 2808)) // isStale must be reachable
+        #expect(record.isStale)
+        #expect(record.lastSuccess == firstSuccess) // freshness clock did not move
+        #expect(record.snapshot?.limitsCapturedAt == healthy.limitsCapturedAt) // carried forward, not reset
+    }
+
     @Test func derivedTrendsCoverAllThreeGauges() {
         let store = UsageStore()
         store.apply(snapshotWithGauge(.claude))

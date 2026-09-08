@@ -87,12 +87,26 @@ final class UsageStore {
             if incoming.secondary == nil { incoming.secondary = previous.secondary }
             if incoming.tertiary == nil { incoming.tertiary = previous.tertiary }
             if incoming.extraWindows.isEmpty { incoming.extraWindows = previous.extraWindows }
+            // The gauges on screen are from the last successful capture, not
+            // this failed attempt — carry that timestamp forward so the age
+            // caption stays honest instead of resetting to "just now".
+            incoming.limitsCapturedAt = previous.limitsCapturedAt
         }
 
         record.snapshot = incoming
-        record.lastError = nil
+        // A carried-forward failure must stay visible on the record: clearing
+        // this unconditionally (as before) made `isStale` —
+        // `snapshot != nil && lastError != nil` — unreachable on this path,
+        // so a failed limits fetch rendered exactly like a fresh success.
+        record.lastError = incoming.limitsError
         record.notConnectedHint = nil
-        record.lastSuccess = incoming.fetchedAt
+        // Only a real limits success moves the freshness clock. Bumping it on
+        // a carried-forward failure was the other half of the honesty bug:
+        // the footer stamped "Updated just now" over numbers that were, in
+        // fact, hours old.
+        if !incoming.limitsUnavailable {
+            record.lastSuccess = incoming.fetchedAt
+        }
         record.hasLoadedOnce = true
         record.isRefreshing = false
         record.notConnectedStrikes = 0

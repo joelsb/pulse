@@ -157,6 +157,7 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
             snapshot.secondary = mapped.secondary
             snapshot.tertiary = mapped.tertiary
             snapshot.extraWindows = mapped.extras
+            snapshot.limitsCapturedAt = now
         case .failure(let error):
             limitsError = error
             snapshot.limitsUnavailable = true
