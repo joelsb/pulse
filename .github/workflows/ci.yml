@@ -34,7 +34,27 @@ jobs:
         run: swift build
 
       - name: Test
-        run: swift test
+        # DIAGNOSTIC ONLY, not a permanent choice: the suite crashes in CI with
+        # SIGTRAP (signal 5) and swift-testing's default parallel execution
+        # means every test's `◇ started` line prints with zero `✔/✘` results,
+        # so the crashing test cannot be named from the log. --no-parallel makes
+        # the LAST started line the crashing test. Revert to parallel once the
+        # culprit is found and fixed.
+        run: swift test --no-parallel
+
+      - name: Dump crash report on test failure
+        if: failure()
+        run: |
+          dir=~/Library/Logs/DiagnosticReports
+          echo "--- ls -la $dir ---"
+          ls -la "$dir" 2>&1 || echo "(no such directory)"
+          echo "--- PulsePackageTests* reports ---"
+          for f in "$dir"/PulsePackageTests*; do
+            if [ -f "$f" ]; then
+              echo "=== $f ==="
+              cat "$f"
+            fi
+          done
 
       # Source-level guards for defects that compile and pass tests: a UI
       # surface bypassing the gauge-direction setting, a Spacer that stops the
