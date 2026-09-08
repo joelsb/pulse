@@ -306,7 +306,7 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
 
         if let accountUUID, let pulseOAuthStore,
            let pulse = await pulseOAuthStore.credentials(forAccountUUID: accountUUID) {
-            // `PulseOAuthStore.credentials` already refreses and already
+            // `PulseOAuthStore.credentials` already refreshes and already
             // excludes an expired result, so this candidate is never expired
             // by construction.
             result.append(Candidate(source: .pulse, credentials: ClaudeCredentials(

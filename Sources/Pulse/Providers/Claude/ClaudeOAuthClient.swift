@@ -34,7 +34,13 @@ struct ClaudeOAuthClient: Sendable {
     /// accepted, so there is no reason to share one and risk colliding with a
     /// pi sign-in mid-flight.
     static let redirectPort: UInt16 = 53810
-    static let redirectURI = "http://localhost:53810/callback"
+    /// Derived from `redirectPort`, never a second literal — the listener
+    /// binds `redirectPort` and the authorize request sends `redirectURI`;
+    /// two independent constants that happened to agree would silently drift
+    /// the moment either one was edited, and the failure (sign-in hangs for
+    /// the full 300s timeout, reporting "Timed out waiting for the browser")
+    /// points at the browser, not at the real cause.
+    static var redirectURI: String { "http://localhost:\(redirectPort)/callback" }
 
     /// Exactly the 5 scopes the token endpoint GRANTS, not the 6 Claude
     /// Code's own CLI requests (`org:create_api_key user:profile
@@ -145,12 +151,25 @@ struct ClaudeOAuthClient: Sendable {
         async let callback = listener.waitForCallback()
         openBrowser(Self.authorizeURL(pkce: pkce))
         let result = try await callback
-        guard result.state == pkce.state else {
-            throw ProviderFetchError.parsing(description: "OAuth callback state did not match — discarding it")
-        }
-        let tokens = try await exchange(code: result.code, verifier: pkce.verifier)
+        let code = try Self.acceptCallback(result, pkce: pkce)
+        let tokens = try await exchange(code: code, verifier: pkce.verifier)
         let profile = try await fetchProfile(accessToken: tokens.accessToken)
         return (tokens, profile)
+    }
+
+    /// The only security-relevant branch in the sign-in flow: `state` proves
+    /// the callback answers THIS listener's own authorize request, not some
+    /// other local process hitting `http://localhost:53810/callback` while
+    /// the listener happens to be armed (loopback listeners are reachable by
+    /// any process on the same Mac, not just the browser Pulse opened).
+    /// Extracted to a pure function so this branch has a test independent of
+    /// a real socket — the listener tests exercise `LoopbackCallbackListener`
+    /// itself and would both stay green if this guard were deleted.
+    static func acceptCallback(_ callback: LoopbackCallbackListener.Callback, pkce: PKCE) throws -> String {
+        guard callback.state == pkce.state else {
+            throw ProviderFetchError.parsing(description: "OAuth callback state did not match — discarding it")
+        }
+        return callback.code
     }
 
     // MARK: - Token endpoint
@@ -340,7 +359,17 @@ final class LoopbackCallbackListener: @unchecked Sendable {
 
     private static func page(title: String, detail: String) -> String {
         "<html><body style=\"font:15px -apple-system,sans-serif;padding:2rem;color:#1c1c1e\">"
-            + "<h2>\(title)</h2><p>\(detail)</p></body></html>"
+            + "<h2>\(escapeHTML(title))</h2><p>\(escapeHTML(detail))</p></body></html>"
+    }
+
+    /// `detail` can carry the provider's own `error=` value straight from the
+    /// query string (untrusted input, even though it never contains token
+    /// material) — escaped before it lands in this locally-served page.
+    private static func escapeHTML(_ text: String) -> String {
+        text.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     /// Guarantees the continuation resumes exactly once across a racing

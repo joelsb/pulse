@@ -44,6 +44,26 @@ actor PulseOAuthStore {
     /// still runs for real. See `scripts/verify-oauth-rotation.sh`.
     private let refreshOverride: (@Sendable (String) async throws -> ClaudeOAuthClient.TokenPair)?
     private let verifyOverride: (@Sendable (String) async -> Bool)?
+    /// Accounts a rotation attempt has proven dead (`400 invalid_grant`) THIS
+    /// run. In-memory only — the durable half is `clearGrant`, which deletes
+    /// both Keychain items, so a relaunch reads "no grant" from `read()`
+    /// itself without needing this set at all. This set exists so the SAME
+    /// run stops retrying the instant it learns the grant is dead, rather
+    /// than waiting for the next `credentials(forAccountUUID:)` call to
+    /// rediscover it via an empty Keychain read.
+    private var deadGrants: Set<String> = []
+    /// Coalesces concurrent rotation attempts for the same account (S3): actor
+    /// isolation does not hold across the `await`s inside `rotate`, so two
+    /// overlapping calls for the same uuid would both read the same pair and
+    /// both spend the single-use refresh token — one wins, one silently burns
+    /// the grant. Today this is unreachable for two reasons that live
+    /// elsewhere and are not otherwise documented near this code: one shared
+    /// `PulseOAuthStore` instance serves every `ClaudeProvider`
+    /// (`AppEnvironment.swift`, `ProviderFactory.swift`), and
+    /// `RefreshScheduler`'s `isRefreshing` guard (`RefreshScheduler.swift`)
+    /// keeps one provider's `fetch()` from overlapping itself. Coalescing
+    /// here removes the dependency on both staying true.
+    private var inFlightRotations: [String: Task<Credentials?, Never>] = [:]
 
     init(
         keychain: KeychainReader = KeychainReader(),
@@ -73,11 +93,23 @@ actor PulseOAuthStore {
             expiresAt: tokens.expiresAt,
             grantedScope: tokens.grantedScope
         )
-        // A fresh sign-in has nothing to protect against a crash mid-rotation
-        // — there is no old pair a mis-write could strand — so both items are
-        // written directly rather than going through `rotate`'s pending step.
-        try await persist(credentials, accountUUID: profile.uuid, service: Self.service)
+        // Pending FIRST, same order `rotate` uses, even though a fresh
+        // sign-in has no old pair a mis-write could strand: if the SECOND
+        // write throws (a `KeychainWriter` verification failure, a timeout),
+        // writing primary first would leave primary holding the new grant
+        // and pending holding nothing for this uuid — harmless. Writing
+        // pending first and having primary throw instead leaves pending
+        // holding the new grant and primary holding nothing, which `read()`
+        // (now freshest-by-`expiresAt`, see its own comment) still resolves
+        // to the new grant. Either order recovers under the new `read()`; this
+        // order is kept so the single rule "pending is written no later than
+        // primary" holds everywhere instead of varying by call site.
         try await persist(credentials, accountUUID: profile.uuid, service: Self.pendingService)
+        try await persist(credentials, accountUUID: profile.uuid, service: Self.service)
+        // A fresh sign-in proves the account was previously dead only if it
+        // was marked so; clear that now so `credentials`/`hasGrant` stop
+        // refusing it.
+        deadGrants.remove(profile.uuid)
         return profile
     }
 
@@ -85,27 +117,57 @@ actor PulseOAuthStore {
 
     /// A pair for `accountUUID` known not to be expired, refreshing first
     /// when it is inside the proactive window. Returns nil when Pulse holds
-    /// no grant for this account — the caller falls back to the harness
-    /// stores, exactly as before this store existed.
+    /// no grant for this account, or when a rotation attempt already proved
+    /// this run that the grant is dead (B1) — either way the caller falls
+    /// back to the harness stores, exactly as before this store existed.
     func credentials(forAccountUUID accountUUID: String) async -> Credentials? {
+        guard !deadGrants.contains(accountUUID) else { return nil }
         guard var current = await read(accountUUID: accountUUID) else { return nil }
         if current.needsRefresh() {
-            if let rotated = try? await rotate(accountUUID: accountUUID, current: current) {
+            if let rotated = await rotateCoalesced(accountUUID: accountUUID, current: current) {
                 current = rotated
             }
-            // A failed rotation attempt is not fatal here: the caller checks
-            // `isExpired()` on whatever is returned and falls back on its own
-            // if even that fails. What matters is that a failed attempt never
-            // discarded the pair that was still good.
+            // A failed-but-not-dead rotation attempt is not fatal here: the
+            // caller checks `isExpired()` on whatever is returned and falls
+            // back on its own if even that fails. What matters is that a
+            // failed attempt never discarded the pair that was still good —
+            // see `rotate`'s doc comment for why it now THROWS on a failed
+            // verification instead of returning the unverified pair (B2).
         }
         return current.isExpired() ? nil : current
     }
 
-    /// Whether Pulse holds ANY grant for this account, expired or not — for
-    /// the Settings row's connection state, which should read "connected"
-    /// even the moment before the next scheduled refresh.
+    /// Whether Pulse holds a usable grant for this account — expired is still
+    /// "yes" (there is a moment before the next scheduled refresh where that
+    /// is normal), but a grant proven dead this run, or a grant this store no
+    /// longer has an item for (including one `clearGrant` just deleted), is
+    /// "no". Read by the Settings row's connection state and by
+    /// `ClaudeProvider.probeConnection()`: this is what makes a dead Pulse
+    /// grant (with no harness fallback) fall through to the EXISTING
+    /// "Not connected" state and "Sign in…" button, rather than needing a new
+    /// UI surface for the same fact.
     func hasGrant(forAccountUUID accountUUID: String) async -> Bool {
-        await read(accountUUID: accountUUID) != nil
+        guard !deadGrants.contains(accountUUID) else { return false }
+        return await read(accountUUID: accountUUID) != nil
+    }
+
+    /// Coalesces concurrent rotation attempts for the same uuid (S3, see the
+    /// `inFlightRotations` doc comment). The dictionary check-and-insert below
+    /// has no `await` between them, so it is atomic under actor isolation —
+    /// a second concurrent call for the same uuid always finds the first
+    /// call's task already registered and awaits ITS result instead of
+    /// starting a second rotation.
+    private func rotateCoalesced(accountUUID: String, current: Credentials) async -> Credentials? {
+        if let inFlight = inFlightRotations[accountUUID] {
+            return await inFlight.value
+        }
+        let task = Task<Credentials?, Never> { [self] in
+            try? await self.rotate(accountUUID: accountUUID, current: current)
+        }
+        inFlightRotations[accountUUID] = task
+        let result = await task.value
+        inFlightRotations[accountUUID] = nil
+        return result
     }
 
     // MARK: - Rotation (ADR-0001)
@@ -124,10 +186,26 @@ actor PulseOAuthStore {
     /// `docs/adr/0001-refresh-token-rotation-write-order.md`.
     private func rotate(accountUUID: String, current: Credentials) async throws -> Credentials {
         let tokens: ClaudeOAuthClient.TokenPair
-        if let refreshOverride {
-            tokens = try await refreshOverride(current.refreshToken)
-        } else {
-            tokens = try await oauthClient.refresh(refreshToken: current.refreshToken)
+        do {
+            if let refreshOverride {
+                tokens = try await refreshOverride(current.refreshToken)
+            } else {
+                tokens = try await oauthClient.refresh(refreshToken: current.refreshToken)
+            }
+        } catch {
+            // B1: `400 invalid_grant` on the refresh call means the refresh
+            // token is PERMANENTLY dead (proven live, see the type's doc
+            // comment) — not a network blip a retry could fix. Left
+            // unmarked, every future tick would resend the same dead token to
+            // a Cloudflare-fronted endpoint forever: the exact
+            // self-renewing-penalty shape `intent.md` documents for
+            // `~/.claude`'s 429, reintroduced by the feature meant to end it.
+            // Marking it here, once, is what stops that loop.
+            if Self.isDeadGrantError(error) {
+                deadGrants.insert(accountUUID)
+                await clearGrant(accountUUID: accountUUID)
+            }
+            throw error
         }
         let rotated = Credentials(
             accessToken: tokens.accessToken,
@@ -138,14 +216,42 @@ actor PulseOAuthStore {
         try await persist(rotated, accountUUID: accountUUID, service: Self.pendingService)
 
         guard await verifies(rotated) else {
-            // The rotated pair is durable in `-pending` even though it could
-            // not be proven — the NEXT read prefers pending over the (now
-            // stale-refresh-token) primary item, so nothing is lost, only
-            // deferred to the next attempt.
-            return rotated
+            // B2: the rotated pair is durable in `-pending` — nothing is lost
+            // — but it must NOT be handed to this call's caller. An unverified
+            // pair that `ClaudeProvider` then pins ahead of a working harness
+            // token would show the user a reason produced by a credential
+            // this code already knows is bad. THROWING (not returning
+            // `rotated`) is what makes `credentials(forAccountUUID:)` keep
+            // `current` — the old pair, still valid until its own natural
+            // expiry — exactly as
+            // `docs/adr/0001-refresh-token-rotation-write-order.md` describes.
+            // The next `needsRefresh()` tick reads `-pending` first (see
+            // `read()`) and retries verification without re-spending the
+            // (already-spent) refresh token.
+            throw ProviderFetchError.dataUnavailable(description: "rotated pair failed verification")
         }
         try await persist(rotated, accountUUID: accountUUID, service: Self.service)
         return rotated
+    }
+
+    /// A refresh-token rotation this dead cannot be retried into working —
+    /// only a human re-sign-in fixes `400 invalid_grant`. Anything else
+    /// (network, 429, 5xx) is transient and must NOT be marked dead.
+    private static func isDeadGrantError(_ error: Error) -> Bool {
+        if case ProviderFetchError.http(400) = error { return true }
+        return false
+    }
+
+    /// The durable half of B1: deletes both Keychain items for `accountUUID`
+    /// so a dead grant cannot outlive this process and cannot shadow a future
+    /// re-sign-in (see `signIn`'s doc comment on write order). Best-effort —
+    /// a delete failure leaves `deadGrants` as the in-memory backstop for the
+    /// rest of this run, and a stale item that no longer answers is already
+    /// harmless: `verifies` would refuse it, and `credentials` never reads it
+    /// again because `deadGrants` already blocks that account.
+    private func clearGrant(accountUUID: String) async {
+        try? await writer.delete(service: Self.service, account: accountUUID)
+        try? await writer.delete(service: Self.pendingService, account: accountUUID)
     }
 
     /// Whether `credentials` actually works, proven by a real request rather
@@ -160,17 +266,30 @@ actor PulseOAuthStore {
 
     // MARK: - Keychain plumbing
 
-    /// Pending first: preferring it at read time is what makes `-pending`
-    /// useful rather than just a backup nobody looks at — a crash right after
-    /// the pending write leaves the primary item holding a burned refresh
-    /// token (reuse = 400 `invalid_grant`), so the ONLY correct pair to hand
-    /// out is whichever one is freshest, and pending is written strictly
-    /// after primary in every code path above.
+    /// Picks whichever item is freshest BY `expiresAt`, not by name — a crash
+    /// right after the pending write in `rotate` leaves the primary item
+    /// holding a burned refresh token (reuse = 400 `invalid_grant`), so the
+    /// only correct pair to hand out is whichever one is actually newer.
+    /// `rotate` always writes pending before primary, so unconditionally
+    /// preferring pending used to give the same answer there — but `signIn`
+    /// writes both directly, and on a mid-write failure could leave pending
+    /// holding a STALE, already-dead grant while primary holds the live one
+    /// (a real hole in the old "always prefer pending" rule). Comparing
+    /// `expiresAt` is correct in both call sites instead of correct in one
+    /// and silently wrong in the other.
     private func read(accountUUID: String) async -> Credentials? {
-        if let pending = try? await load(service: Self.pendingService, accountUUID: accountUUID) {
+        let pending = try? await load(service: Self.pendingService, accountUUID: accountUUID)
+        let primary = try? await load(service: Self.service, accountUUID: accountUUID)
+        switch (pending, primary) {
+        case (let pending?, let primary?):
+            return pending.expiresAt >= primary.expiresAt ? pending : primary
+        case (let pending?, nil):
             return pending
+        case (nil, let primary?):
+            return primary
+        case (nil, nil):
+            return nil
         }
-        return try? await load(service: Self.service, accountUUID: accountUUID)
     }
 
     private func load(service: String, accountUUID: String) async throws -> Credentials {

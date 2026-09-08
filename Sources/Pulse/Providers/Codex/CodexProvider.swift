@@ -73,6 +73,11 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
             let windows = CodexUsageAPI.limitWindows(from: response, now: now)
             snapshot.primary = windows.primary
             snapshot.secondary = windows.secondary
+            // A real answer from the live endpoint, so the age caption on a
+            // LATER failed poll has something honest to measure from (see
+            // ProviderGlanceCard.staleCaption — it deliberately has no
+            // fallback for a provider that never sets this).
+            snapshot.limitsCapturedAt = now
             if let credits = CodexUsageAPI.creditsNote(from: response) {
                 snapshot.statusNotes.append(credits)
             }

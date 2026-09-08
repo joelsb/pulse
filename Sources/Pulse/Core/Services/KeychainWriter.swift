@@ -70,6 +70,51 @@ struct KeychainWriter: Sendable {
         }
     }
 
+    /// Deletes the generic-password item for `service`/`account`, needed by
+    /// `PulseOAuthStore` to make a dead grant (B1: `400 invalid_grant`) not
+    /// just in-memory-refused but actually gone — so a re-sign-in is never
+    /// shadowed by a stale item under the same uuid, and a relaunch reads
+    /// "no grant" without needing to remember anything. An already-absent
+    /// item (`errSecItemNotFound`, status 44) is treated as success: deleting
+    /// something that is already gone achieved exactly what was asked.
+    func delete(service: String, account: String, timeout: TimeInterval = 15) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let box = OnceBox()
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            process.arguments = ["delete-generic-password", "-s", service, "-a", account]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+
+            process.terminationHandler = { finished in
+                guard box.claim() else { return }
+                switch finished.terminationStatus {
+                case 0, 44:
+                    continuation.resume()
+                default:
+                    continuation.resume(throwing: Failure.failed(status: finished.terminationStatus))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                if box.claim() { continuation.resume(throwing: error) }
+                return
+            }
+
+            let watched = process
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                guard watched.isRunning else { return }
+                watched.terminate()
+                if box.claim() {
+                    continuation.resume(throwing: Failure.failed(status: -1))
+                }
+            }
+        }
+    }
+
     private func runAdd(service: String, account: String, secret: String, timeout: TimeInterval) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let box = OnceBox()

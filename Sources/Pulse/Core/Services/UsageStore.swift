@@ -101,10 +101,27 @@ final class UsageStore {
         record.lastError = incoming.limitsError
         record.notConnectedHint = nil
         // Only a real limits success moves the freshness clock. Bumping it on
-        // a carried-forward failure was the other half of the honesty bug:
+        // a carried-forward FAILURE was the other half of the honesty bug:
         // the footer stamped "Updated just now" over numbers that were, in
         // fact, hours old.
-        if !incoming.limitsUnavailable {
+        //
+        // Keyed on `limitsError == nil`, not `!limitsUnavailable` — the two
+        // are NOT the same thing. Cursor sets `limitsUnavailable` for an
+        // account that simply has no plan gauge to report (a permanent,
+        // successful property of that plan, `CursorProvider.swift`) and
+        // Codex can set it with `limitsError == nil` when the usage call
+        // succeeded but produced no primary window
+        // (`CodexProvider.swift`). Neither carries `lastError` (see above),
+        // so `isStale` stays false and the card renders normally — but
+        // keying this on `limitsUnavailable` alone froze `lastSuccess` at nil
+        // forever for both, which froze `PanelFooter`'s "Updated Xm ago" at
+        // "Waiting for first update…" permanently AND defeated
+        // `RefreshScheduler.refreshAll(ifOlderThan:)` (`lastSuccess ??
+        // .distantPast` never ages), so opening the panel re-ran every fetch
+        // every time. Claude always sets `limitsUnavailable` and
+        // `limitsError` together (`ClaudeProvider.swift`), so this changes
+        // nothing for the case this file's `apply` fix is about.
+        if incoming.limitsError == nil {
             record.lastSuccess = incoming.fetchedAt
         }
         record.hasLoadedOnce = true

@@ -34,14 +34,17 @@ func checkEqual<T: Equatable>(_ lhs: T, _ rhs: T, _ label: String) {
 }
 
 // A distinct account per test case, never a real Anthropic uuid, so a defect
-// in this harness can never touch a real grant. Every name is printed as
-// `SCRATCH_ACCOUNT <name>` and the .sh wrapper deletes both Keychain items
-// for each one it sees on stdout, whether the run passed or failed.
-nonisolated(unsafe) var scratchAccounts: [String] = []
-
+// in this harness can never touch a real grant. Printed as
+// `SCRATCH_ACCOUNT <name>` and FLUSHED the instant it is minted — not
+// batched to the end of the run — and the .sh wrapper deletes both Keychain
+// items for each one it sees on stdout. Printing early, not late, is what
+// lets cleanup happen even if the process dies abnormally (a hang the
+// wrapper's own timeout kills, a crash) partway through the scenarios,
+// rather than only on a clean exit.
 func scratchAccount(_ label: String) -> String {
     let name = "harness-scratch-\(label)-\(UUID().uuidString.prefix(8))"
-    scratchAccounts.append(name)
+    print("SCRATCH_ACCOUNT \(name)")
+    fflush(stdout)
     return name
 }
 
@@ -91,7 +94,14 @@ func runVerificationFailureScenario() async {
         verifyOverride: { _ in false } // the rotated pair does not check out
     )
 
-    _ = await store.credentials(forAccountUUID: account)
+    // B2: this is the assertion the original harness discarded entirely
+    // (`_ = await store.credentials(...)`), which is exactly why a rotate()
+    // that returned the unverified pair could pass all four planted defects
+    // - none of them touch the return value, only the Keychain items. A pair
+    // that failed verification must never reach the caller: `credentials()`
+    // must keep handing out the OLD, still-valid pair.
+    let returned = await store.credentials(forAccountUUID: account)
+    checkEqual(returned?.accessToken, "OLD-AT", "scenario 1: a failed-verification rotation must return the OLD pair, never the unverified NEW one")
 
     let pendingAfter = await readItem(service: "de.byte.pulse.oauth-pending", account: account)
     let primaryAfter = await readItem(service: "de.byte.pulse.oauth", account: account)
@@ -178,6 +188,59 @@ func runNoRotationWhenFreshScenario() async {
     check(!refreshCalledFlag.value, "scenario 4: a pair outside the refresh window must never trigger a rotation")
 }
 
+// ------------------------------------------------------------ Scenario 5
+// B1: a refresh call that returns 400 (invalid_grant) is PERMANENT, never
+// retried, and its Keychain items are actually deleted, not just refused in
+// memory - so the account reads as "not connected" even after a relaunch.
+
+func runDeadGrantScenario() async {
+    let account = scratchAccount("dead-grant")
+    let old = pair(access: "OLD-AT-5", refresh: "OLD-RT-5", expiresIn: 60)
+    do { try await seed(account: account, tokens: old) } catch {
+        failures.append("scenario 5: seeding failed: \(error)")
+        return
+    }
+
+    let refreshCallCount = CountBox()
+    let store = PulseOAuthStore(refreshOverride: { _ in
+        refreshCallCount.increment()
+        throw ProviderFetchError.http(status: 400)
+    })
+
+    _ = await store.credentials(forAccountUUID: account)
+    let deadAfterFirstCall = await !store.hasGrant(forAccountUUID: account)
+    check(deadAfterFirstCall, "scenario 5: hasGrant must report false once a 400 has been seen for this account")
+
+    // Second call on the SAME store: must not call the refresh override
+    // again (the account is already known dead), and must not resurrect a
+    // pair from the Keychain either.
+    let secondResult = await store.credentials(forAccountUUID: account)
+    check(secondResult == nil, "scenario 5: a dead account must never hand out a pair again in the same run")
+    checkEqual(refreshCallCount.value, 1, "scenario 5: a dead grant must not be retried - the refresh call must happen exactly once")
+
+    // Durable half: both Keychain items must actually be gone, so a relaunch
+    // (a brand new store instance) also reads "no grant", not "expired grant"
+    // - the two read differently to a user (silent forever-retry vs a visible
+    // Sign in prompt).
+    let primaryAfter = await readItem(service: "de.byte.pulse.oauth", account: account)
+    let pendingAfter = await readItem(service: "de.byte.pulse.oauth-pending", account: account)
+    check(primaryAfter == nil, "scenario 5: the primary Keychain item must be deleted for a dead grant")
+    check(pendingAfter == nil, "scenario 5: the pending Keychain item must be deleted for a dead grant")
+
+    let freshStore = PulseOAuthStore()
+    let afterRelaunch = await freshStore.hasGrant(forAccountUUID: account)
+    check(!afterRelaunch, "scenario 5: a fresh store after 'relaunch' must also read no grant for a dead account")
+}
+
+/// A locked counter, since the refresh override runs off-actor and Swift 6
+/// won't let a plain closure mutate a captured `var` across that boundary.
+final class CountBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
 /// A locked bool, since the refresh override runs off-actor and Swift 6
 /// won't let a plain closure mutate a captured `var` across that boundary.
 final class FlagBox: @unchecked Sendable {
@@ -193,13 +256,12 @@ Task {
     await runVerificationSuccessScenario()
     await runRefreshFailureScenario()
     await runNoRotationWhenFreshScenario()
+    await runDeadGrantScenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {
     RunLoop.main.run(until: Date().addingTimeInterval(0.05))
 }
-
-for account in scratchAccounts { print("SCRATCH_ACCOUNT \(account)") }
 
 if failures.isEmpty {
     print("ALL PASS")

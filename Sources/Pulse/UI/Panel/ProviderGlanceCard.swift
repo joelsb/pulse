@@ -92,18 +92,26 @@ struct ProviderGlanceCard: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// "43m old — Rate limited by the provider — retrying at 11:44 PM": the age
-    /// of the numbers actually on screen, plus why they stopped updating.
+    /// "43m old - Rate limited by the provider - retrying at 11:44 PM": the
+    /// age of the numbers actually on screen, plus why they stopped updating.
     /// Age reads `limitsCapturedAt` (the last successful capture, carried
-    /// forward by `UsageStore.apply` through every failed attempt since), and
-    /// falls back to `record.lastSuccess` for providers that don't stamp it
-    /// — that field is bumped on the same "real success only" rule, so it is
-    /// never a claim to be fresher than reality.
+    /// forward by `UsageStore.apply` through every failed attempt since), or
+    /// `record.lastSuccess` for a provider that doesn't stamp it (bumped on
+    /// the same "real success only" rule, so never a claim to be fresher than
+    /// reality). Deliberately NO fallback to `snapshot.fetchedAt` beyond
+    /// that: `fetchedAt` is the timestamp of THIS attempt, which just failed
+    /// — falling back to it renders "0s old" over numbers that were never
+    /// captured at all (a provider whose limits have not once succeeded this
+    /// run), which is a MORE confident false claim than the bug this caption
+    /// exists to fix. When there is truly no capture time, show the reason
+    /// alone.
     private func staleCaption(for snapshot: UsageSnapshot) -> some View {
-        let capturedAt = snapshot.limitsCapturedAt ?? record.lastSuccess ?? snapshot.fetchedAt
-        let age = Date.now.timeIntervalSince(capturedAt)
+        let capturedAt = snapshot.limitsCapturedAt ?? record.lastSuccess
         let reason = record.lastError?.userMessage ?? "Limits unavailable"
-        return Text("\(Formatters.duration(age)) old — \(reason)")
+        let text = capturedAt.map { captured in
+            "\(Formatters.duration(Date.now.timeIntervalSince(captured))) old - \(reason)"
+        } ?? reason
+        return Text(text)
             .font(Typo.caption)
             .foregroundStyle(PulseColor.warnStrong)
             .lineLimit(2)

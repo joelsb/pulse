@@ -12,6 +12,14 @@
 # codebase, so this gets the same treatment: plant the defect, require it
 # caught.
 #
+# Review round 1 (2026-09-08) found that the FIRST version of this verifier
+# discarded the one return value (`_ = await store.credentials(...)`) that
+# would have caught B2 - a rotation that fails verification handing out the
+# unverified pair anyway - so all four original planted defects passed while
+# that property was completely unguarded. This version asserts the return
+# value, and adds two more defects (a regressed B2 fix, a regressed B1 dead-
+# grant fix) that only that assertion and the new dead-grant scenario can see.
+#
 # This runs against the REAL Keychain, using scratch account names
 # (`harness-scratch-...`) that are never read by production code and are
 # deleted at the end of every run, pass or fail.
@@ -109,19 +117,11 @@ run_case() {
       swap "$dir/PulseOAuthStore.swift" \
 '        try await persist(rotated, accountUUID: accountUUID, service: Self.pendingService)
 
-        guard await verifies(rotated) else {
-            // The rotated pair is durable in `-pending` even though it could
-            // not be proven — the NEXT read prefers pending over the (now
-            // stale-refresh-token) primary item, so nothing is lost, only
-            // deferred to the next attempt.
-            return rotated
-        }
-        try await persist(rotated, accountUUID: accountUUID, service: Self.service)
-        return rotated' \
+        guard await verifies(rotated) else {' \
 '        try await persist(rotated, accountUUID: accountUUID, service: Self.service)
         _ = await verifies(rotated)
         try await persist(rotated, accountUUID: accountUUID, service: Self.pendingService)
-        return rotated'
+        if false {'
       ;;
     skip-verification)
       # Verification result is computed but never gates the promotion.
@@ -139,17 +139,27 @@ run_case() {
 '        guard await verifies(rotated) else {'
       ;;
     pending-not-preferred)
-      # Reads the stale primary first, defeating the entire point of the
-      # pending item once a rotation has partially landed.
+      # Reads pick the STALER item instead of the freshest one - the exact
+      # inversion of what read() must do.
       swap "$dir/PulseOAuthStore.swift" \
-'        if let pending = try? await load(service: Self.pendingService, accountUUID: accountUUID) {
-            return pending
-        }
-        return try? await load(service: Self.service, accountUUID: accountUUID)' \
-'        if let primary = try? await load(service: Self.service, accountUUID: accountUUID) {
-            return primary
-        }
-        return try? await load(service: Self.pendingService, accountUUID: accountUUID)'
+        'return pending.expiresAt >= primary.expiresAt ? pending : primary' \
+        'return pending.expiresAt >= primary.expiresAt ? primary : pending'
+      ;;
+    return-unverified-pair)
+      # B2 regression: hands the caller a pair that failed verification,
+      # instead of keeping it durable in -pending and throwing so the caller
+      # keeps the old, still-valid one.
+      swap "$dir/PulseOAuthStore.swift" \
+        'throw ProviderFetchError.dataUnavailable(description: "rotated pair failed verification")' \
+        'return rotated'
+      ;;
+    no-dead-grant-detection)
+      # B1 regression: a 400 invalid_grant is never marked or cleared, so a
+      # dead grant is retried forever - the exact self-renewing-penalty shape
+      # this whole feature exists to end.
+      swap "$dir/PulseOAuthStore.swift" \
+        'if Self.isDeadGrantError(error) {' \
+        'if false {'
       ;;
     *)
       echo "unknown defect: $defect"; exit 1
@@ -207,10 +217,12 @@ echo
 echo "planted defects (each MUST be caught):"
 
 UNCAUGHT=0
-run_case "primary written before verification, pending after"  primary-first          || UNCAUGHT=$((UNCAUGHT + 1))
-run_case "verification computed but not enforced"              skip-verification      || UNCAUGHT=$((UNCAUGHT + 1))
-run_case "pending write dropped entirely"                       no-pending-persist     || UNCAUGHT=$((UNCAUGHT + 1))
-run_case "read prefers the stale primary over pending"          pending-not-preferred  || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "primary written before verification, pending after"   primary-first            || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "verification computed but not enforced"               skip-verification        || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "pending write dropped entirely"                        no-pending-persist       || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "read prefers the staler item over the fresher one"     pending-not-preferred    || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "B2 regressed: unverified pair returned to the caller"  return-unverified-pair   || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "B1 regressed: a dead grant is never marked or cleared" no-dead-grant-detection  || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then

@@ -2,12 +2,19 @@ import Foundation
 import Testing
 @testable import Pulse
 
-// JSB-8: Pulse's own Claude OAuth grant. Everything here is pure — no
-// network, no Keychain, no browser — so it runs under `swift test` in CI
-// (macos-26) even though it cannot run on this machine (`error: no such
-// module 'Testing'`, no Xcode). The listener, the real Keychain write/read
-// round trip, and the live token exchange were verified by hand against real
-// sockets and the real Keychain during implementation; see impl-pulse.md.
+// JSB-8: Pulse's own Claude OAuth grant. Most of this is pure — no network,
+// no Keychain, no browser — so it runs under `swift test` in CI (macos-26)
+// even though it cannot run on this machine (`error: no such module
+// 'Testing'`, no Xcode). The exception is `LoopbackCallbackListenerTests`
+// below: those two DO bind a real loopback socket and drive a real
+// `URLSession` request at it, with a fixed `Task.sleep` to win the bind race
+// rather than a synchronization primitive — a CI runner that denies a
+// loopback bind, or heavy load, could fail them for reasons unrelated to the
+// code under test. Flagged here rather than left implicit (review round 1,
+// 2026-09-08), since the rest of this file being genuinely pure made that
+// exception easy to miss. The Keychain write/read round trip and the live
+// token exchange were separately verified by hand against the real Keychain
+// and a real socket during implementation; see impl-pulse.md.
 
 @Suite("ClaudeOAuthClient PKCE")
 struct ClaudeOAuthPKCETests {
@@ -55,10 +62,38 @@ struct ClaudeOAuthAuthorizeURLTests {
         #expect(value("state") == "s")
         #expect(value("client_id") == ClaudeOAuthClient.clientID)
         #expect(value("redirect_uri") == ClaudeOAuthClient.redirectURI)
+        // Asserts AGREEMENT between the two constants, not the literal against
+        // itself (review round 1, S4): `redirectURI` is derived from
+        // `redirectPort`, so a bug that lets them drift independently again
+        // would still pass a test that only checked "contains 53810".
+        #expect(ClaudeOAuthClient.redirectURI.contains(":\(ClaudeOAuthClient.redirectPort)/"))
         // Never pi's port — falsified live that Pulse's own arbitrary port
         // works, so there is no reason to risk colliding with a pi sign-in.
-        #expect(ClaudeOAuthClient.redirectURI.contains(":53810/") )
-        #expect(!ClaudeOAuthClient.redirectURI.contains("53692"))
+        #expect(ClaudeOAuthClient.redirectPort != 53692)
+    }
+}
+
+@Suite("ClaudeOAuthClient callback acceptance (state check)")
+struct ClaudeOAuthAcceptCallbackTests {
+    // S5 (review round 1): `state` is the only security-relevant branch in
+    // the sign-in flow — it is what stops any other local process hitting
+    // the loopback listener from being accepted as the real callback. The
+    // listener tests below exercise `LoopbackCallbackListener` itself, not
+    // `signIn`, and would both stay green if this guard were deleted; these
+    // two close that gap.
+    @Test func matchingStateReturnsTheCode() throws {
+        let pkce = ClaudeOAuthClient.PKCE(verifier: "v", challenge: "c", state: "expected-state")
+        let callback = LoopbackCallbackListener.Callback(code: "the-code", state: "expected-state")
+        let code = try ClaudeOAuthClient.acceptCallback(callback, pkce: pkce)
+        #expect(code == "the-code")
+    }
+
+    @Test func mismatchedStateThrowsAndNeverReturnsTheCode() {
+        let pkce = ClaudeOAuthClient.PKCE(verifier: "v", challenge: "c", state: "expected-state")
+        let callback = LoopbackCallbackListener.Callback(code: "attacker-code", state: "wrong-state")
+        #expect(throws: (any Error).self) {
+            try ClaudeOAuthClient.acceptCallback(callback, pkce: pkce)
+        }
     }
 }
 
@@ -117,9 +152,10 @@ struct PulseOAuthStoreEncodingTests {
             grantedScope: "user:profile"
         )
         let encoded = try PulseOAuthStore.encode(credentials)
-        // The secret must never be argv-shaped or contain anything that would
-        // look like a shell word boundary issue if it ever leaked into a log
-        // — plain JSON only.
+        // Only a shape check (encoding is plain JSON, not argv-shaped) — the
+        // actual secret-discipline guarantee (never in `arguments`, a log
+        // line, or an error) is `KeychainWriter`'s, verified by hand against
+        // the real Keychain during implementation; see impl-pulse.md.
         #expect(encoded.hasPrefix("{"))
         let decoded = try PulseOAuthStore.decode(encoded)
         #expect(decoded == credentials)
