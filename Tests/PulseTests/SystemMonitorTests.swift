@@ -136,7 +136,10 @@ struct SystemMonitorTests {
         // never differ in length - a card reading a shorter one would silently
         // plot a stale window.
         #expect(monitor.memoryHistory.count == monitor.cpuHistory.count)
-        #expect(monitor.memoryHistory.last == 100)
+        // memoryTotal is 100, memoryUsed is min(index, 100); the loop only runs
+        // to historyLimit+19 (79), which never reaches the 100-total cap, so
+        // the last utilization is 79, not a saturated 100.
+        #expect(monitor.memoryHistory.last == 79)
     }
 
     @MainActor
@@ -225,6 +228,7 @@ struct SystemMonitorTests {
 
     // MARK: - Sparkline geometry
 
+    @MainActor
     @Test("Sparkline maps values into the box, newest at the right edge")
     func sparklinePoints() {
         let size = CGSize(width: 100, height: 50)
@@ -236,6 +240,7 @@ struct SystemMonitorTests {
         #expect(points[2] == CGPoint(x: 100, y: 0))  // 100% touches the top
     }
 
+    @MainActor
     @Test("Out-of-range values clamp instead of drawing outside the card")
     func sparklineClamps() {
         let size = CGSize(width: 10, height: 10)
@@ -244,6 +249,7 @@ struct SystemMonitorTests {
         #expect(points[1].y == 0)
     }
 
+    @MainActor
     @Test("Fewer than two samples produce no path")
     func sparklineEmpty() {
         #expect(Sparkline.points([42], in: CGSize(width: 10, height: 10), maximum: 100).isEmpty)
