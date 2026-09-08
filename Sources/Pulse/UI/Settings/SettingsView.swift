@@ -123,6 +123,18 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
 
                 if settings.menuBarStyle == .stats {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Second line", selection: $settings.menuBarSecondaryRow) {
+                            ForEach(SettingsStore.MenuBarSecondaryRow.allCases, id: \.self) { row in
+                                Text(row.title).tag(row)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text("The top line is always the session window. Below it: the 7-day limit, or how the session percentage moved in the last hour.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
                     ForEach(ProviderID.allCases) { id in
                         Toggle(
                             environment.descriptor(for: id).name,

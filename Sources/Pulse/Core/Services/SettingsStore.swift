@@ -13,6 +13,21 @@ final class SettingsStore {
         case icon
     }
 
+    /// What the second line of a menu bar stat block carries.
+    enum MenuBarSecondaryRow: String, CaseIterable, Sendable {
+        /// The weekly limit percentage, in the same direction as the top row.
+        case weekly
+        /// Trend arrow + delta of the session window vs ~1h ago.
+        case trend
+
+        var title: String {
+            switch self {
+            case .weekly: "Weekly limit"
+            case .trend: "Session trend"
+            }
+        }
+    }
+
     /// How the panel arranges enabled providers.
     enum PanelLayout: String, CaseIterable, Sendable {
         /// One provider at a time behind a segmented tab bar.
@@ -96,6 +111,7 @@ final class SettingsStore {
         static let enabledProviders = "enabledProviders"
         static let menuBarProviders = "menuBarProviders"
         static let menuBarStyle = "menuBarStyle"
+        static let menuBarSecondaryRow = "menuBarSecondaryRow"
         static let selectedTab = "selectedTab"
         static let dailyTimeframe = "dailyTimeframe"
         static let knownProviders = "knownProviders"
@@ -134,6 +150,14 @@ final class SettingsStore {
 
     var menuBarStyle: MenuBarStyle {
         didSet { defaults.set(menuBarStyle.rawValue, forKey: Key.menuBarStyle) }
+    }
+
+    /// Second line of each menu bar block: the weekly limit, or the session
+    /// trend delta. The top line is always the session window, so this is the
+    /// only choice worth making there - both answers are about "can I keep
+    /// working", and only one of them fits.
+    var menuBarSecondaryRow: MenuBarSecondaryRow {
+        didSet { defaults.set(menuBarSecondaryRow.rawValue, forKey: Key.menuBarSecondaryRow) }
     }
 
     /// Whether limit gauges show what is used or what is left. Applies to the
@@ -289,6 +313,12 @@ final class SettingsStore {
 
         menuBarStyle = defaults.string(forKey: Key.menuBarStyle)
             .flatMap(MenuBarStyle.init(rawValue:)) ?? .stats
+
+        // Default weekly: the 7-day cap is the one that actually stops work
+        // for a day, and the trend delta answers a question the session
+        // percentage mostly already answers.
+        menuBarSecondaryRow = defaults.string(forKey: Key.menuBarSecondaryRow)
+            .flatMap(MenuBarSecondaryRow.init(rawValue:)) ?? .weekly
 
         gaugeDirection = defaults.string(forKey: Key.gaugeDirection)
             .flatMap(GaugeDirection.init(rawValue:)) ?? .remaining

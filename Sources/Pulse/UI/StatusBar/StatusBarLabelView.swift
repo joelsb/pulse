@@ -32,7 +32,8 @@ struct StatusBarLabelView: View {
                     ProviderStatBlock(
                         code: descriptors[id]?.shortCode ?? id.rawValue.uppercased(),
                         record: store.record(for: id),
-                        direction: settings.gaugeDirection
+                        direction: settings.gaugeDirection,
+                        secondaryRow: settings.menuBarSecondaryRow
                     )
                 }
             }
@@ -53,6 +54,8 @@ private struct ProviderStatBlock: View {
     /// the card behind it, so a reversed panel with a non-reversed menu bar is
     /// a contradiction the user reads before anything else.
     var direction: SettingsStore.GaugeDirection = .remaining
+    /// Whether the bottom line is the weekly limit or the session trend.
+    var secondaryRow: SettingsStore.MenuBarSecondaryRow = .weekly
 
     /// Raw utilization, for colour and trend (both always key off consumption).
     private var utilization: Double? { record.snapshot?.primary?.utilization }
@@ -62,11 +65,20 @@ private struct ProviderStatBlock: View {
         utilization.map(direction.displayValue(utilization:))
     }
 
-    private var dotColor: Color {
-        guard let utilization else { return Color.primary.opacity(0.25) }
-        if record.isStale { return PulseColor.warnStrong }
-        return PulseColor.threshold(utilization: utilization)
+    /// Raw weekly utilization, when the provider publishes a weekly window.
+    private var weeklyUtilization: Double? { record.snapshot?.secondary?.utilization }
+
+    private var weeklyDisplayValue: Double? {
+        weeklyUtilization.map(direction.displayValue(utilization:))
     }
+
+    private func dotColor(for value: Double?) -> Color {
+        guard let value else { return Color.primary.opacity(0.25) }
+        if record.isStale { return PulseColor.warnStrong }
+        return PulseColor.threshold(utilization: value)
+    }
+
+    private var dotColor: Color { dotColor(for: utilization) }
 
     var body: some View {
         HStack(spacing: 2.5) {
@@ -83,8 +95,39 @@ private struct ProviderStatBlock: View {
                         .contentTransition(.numericText(value: displayValue ?? 0))
                         .animation(Motion.numberTick, value: displayValue)
                 }
-                trendRow
+                secondaryLine
             }
+        }
+    }
+
+    @ViewBuilder
+    private var secondaryLine: some View {
+        switch secondaryRow {
+        case .weekly: weeklyRow
+        case .trend: trendRow
+        }
+    }
+
+    /// The 7-day cap, drawn with the same dot + number shape as the session
+    /// line above it so the two read as one column, not two unrelated stats.
+    @ViewBuilder
+    private var weeklyRow: some View {
+        if let weeklyDisplayValue {
+            HStack(spacing: 2.5) {
+                Circle()
+                    .fill(dotColor(for: weeklyUtilization))
+                    .frame(width: 4, height: 4)
+                    .animation(Motion.staleTint, value: record.isStale)
+                Text(Formatters.percent(weeklyDisplayValue))
+                    .font(Typo.menuBarDelta)
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText(value: weeklyDisplayValue))
+                    .animation(Motion.numberTick, value: weeklyDisplayValue)
+            }
+        } else {
+            Text("–")
+                .font(Typo.menuBarDelta)
+                .foregroundStyle(.secondary)
         }
     }
 
