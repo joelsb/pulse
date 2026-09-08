@@ -51,6 +51,27 @@ import Foundation
 /// the pending→verify→promote pattern the OAuth rotation ADR uses for the
 /// network side of the same problem — trust nothing that answered 200/0
 /// until it also answers what you asked it.
+///
+/// **A THIRD limit, found 2026-09-08 building JSB-9 (Codex): the cap is on
+/// the whole composed STDIN LINE, not on the secret value alone.** The
+/// "up to 1,800 bytes" figure above was measured with a short, fixed
+/// service/account name, which hid this — a longer service or account name
+/// eats directly into the same budget. Measured with a SHORT service name:
+/// `sent 4000 -> stored 4000`, `sent 4090 -> stored 4032`, `sent 4095 ->
+/// stored 4032`, `sent 5000 -> stored 4032` (the ceiling is on the STORED
+/// value once the line as a whole is too long, not proportional to how much
+/// was sent past it). The identical test with the service name 105
+/// characters longer moved the ceiling from 4032 down to 3924 — a drop of
+/// 108, matching the longer name almost exactly:
+/// `sent 3900 -> stored 3900`, `sent 3950 -> stored 3924`, `sent 4000 ->
+/// stored 3924`. The line is `add-generic-password -U -a <account> -s
+/// <service> -w <base64 secret>\n`, and the underlying limit (a `security -i`
+/// stdin read buffer, ~4,096 bytes total) applies to that ENTIRE string —
+/// **renaming a Keychain service or account can silently shrink the budget
+/// a payload that used to fit needs**, which is why `write` below computes
+/// the composed line and refuses to even attempt one that doesn't leave
+/// enough headroom, rather than relying only on the post-write read-back to
+/// notice.
 struct KeychainWriter: Sendable {
     enum Failure: Error, Equatable {
         /// The read-back after the write didn't match what was sent, once
@@ -58,6 +79,14 @@ struct KeychainWriter: Sendable {
         /// truncated, or something else clobbered the item between the write
         /// and the check.
         case verificationFailed
+        /// The composed `security -i` command line (`add-generic-password
+        /// -U -a <account> -s <service> -w <base64>`) would exceed the
+        /// measured stdin-line budget — see the type's own doc comment for
+        /// the two measurements this threshold rests on. Thrown BEFORE the
+        /// write is attempted, so this reads as "the line was too long" and
+        /// not as the generic, harder-to-diagnose `verificationFailed` a
+        /// silent truncation would otherwise produce.
+        case lineTooLong(length: Int, limit: Int)
         case failed(status: Int32)
     }
 
@@ -177,8 +206,25 @@ struct KeychainWriter: Sendable {
     /// doc comment for why: the two-copy stdin-PROMPT mode (`-w` with no
     /// trailing value) this replaced silently capped every value at 128
     /// bytes.
+    /// Measured safety threshold for the WHOLE composed `security -i`
+    /// command line — see the type's doc comment for the two measurements
+    /// (short vs. 105-characters-longer service name) this rests on. Kept
+    /// below the observed ~4,032/~3,924-byte truncation points, not at the
+    /// wall itself: a few bytes of drift in exactly how `security -i`
+    /// buffers its input is cheaper to lose as headroom than to rediscover
+    /// as a silent truncation. Codex's own payload (access + refresh tokens
+    /// plus a short derived account id, no id_token — see
+    /// `CodexOAuthStore`'s doc comment) base64-encodes to roughly 2,600
+    /// bytes against this ~4,000-byte budget: about 65% used, real headroom
+    /// left for the service/account names to grow before this threshold
+    /// would ever fire in production.
+    static let maxCommandLineLength = 4000
+
     private func runAdd(service: String, account: String, secret: String, timeout: TimeInterval) async throws {
         let command = "add-generic-password -U -a \(account) -s \(service) -w \(Self.encode(secret))\n"
+        guard command.utf8.count <= Self.maxCommandLineLength else {
+            throw Failure.lineTooLong(length: command.utf8.count, limit: Self.maxCommandLineLength)
+        }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let box = OnceBox()

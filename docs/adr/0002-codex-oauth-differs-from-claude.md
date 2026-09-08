@@ -64,6 +64,42 @@ ADR expands on rather than restates verbatim):
   actually accepts. `curl` cannot answer a redirect_uri question on this
   provider; only a real browser session can.
 
+## Correction (2026-09-08): the Keychain-write limit id_token hit is on the whole command line, not the secret
+
+Building this ticket, an earlier draft persisted the id_token itself (see
+"Consequences" below for why that was wrong on its own terms) and hit a
+write failure. The first write-up of that failure, in `CodexOAuthStore`'s
+own doc comment and in an earlier version of this ADR, mis-stated the cause
+as "a ~4,096-byte cap on the secret value." Re-measured and corrected: the
+cap is on the WHOLE composed `security -i` stdin command line
+(`add-generic-password -U -a <account> -s <service> -w <base64 secret>`),
+not on the base64 payload alone. Two measurements, same short-vs-long
+comparison ADR-0001 already uses for the 128-byte cap:
+
+```
+short service name:  sent 4000 -> stored 4000   sent 4090 -> stored 4032
+                      sent 4095 -> stored 4032   sent 5000 -> stored 4032
+service name +105 chars:  sent 3900 -> stored 3900   sent 3950 -> stored 3924
+                           sent 4000 -> stored 3924
+```
+
+The ceiling moved from 4032 to 3924 - down by 108, matching the longer
+name almost exactly. **The secret's usable budget is
+`~4096 - len("add-generic-password -U -a <account> -s <service> -w ")`,
+so lengthening a Keychain service or account name shrinks the budget a
+payload that used to fit needs, silently.** Renaming
+`de.byte.pulse.codex-oauth` to something longer, for instance, could
+re-truncate a payload that was safely under the wall before the rename -
+with no code change to the payload itself.
+
+Fixed at the source, not just documented: `KeychainWriter.write` now
+computes the composed line and refuses (`Failure.lineTooLong`) to even
+attempt a write that doesn't leave headroom, rather than relying only on
+the post-write read-back to notice - see that type's own doc comment for
+the measurements and the constant (`maxCommandLineLength`, 4,000, with the
+headroom Codex's real payload leaves against it). Guarded by
+`scripts/verify-codex-oauth-rotation.sh`'s over-length scenario.
+
 ## Why the client id and scope are what they are, not requested fresh
 
 `CodexOAuthClient.clientID` (`app_EMoamEEZ73f0CkXaXp7hrann`) was not

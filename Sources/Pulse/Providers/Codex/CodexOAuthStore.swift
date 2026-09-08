@@ -24,14 +24,17 @@ import Foundation
 /// This was found the hard way while implementing: the first version stored
 /// the raw id_token (1,765 characters on this machine's real token) alongside
 /// the access and refresh tokens, and the combined base64 payload
-/// (~5,244 characters) silently truncated at a real, previously-undocumented
-/// `security -i` STDIN LINE LENGTH limit (measured ~4,096 bytes total command
-/// line, independent of and smaller than the 128-byte-per-value cap
-/// ADR-0001 already fixed) - the write "succeeded" (exit 0 on the first,
-/// truncated command) and then `security -i` reported `unknown command` for
-/// the truncated remainder. Dropping the id_token from the payload both
-/// obeys constraint 7 and keeps every write comfortably inside the length
-/// ADR-0001 already tested (up to 1,800 bytes).
+/// (~5,244 characters) silently truncated. The cap is NOT on the secret
+/// value alone - it is on the whole composed `security -i` stdin command
+/// line (`add-generic-password -U -a <account> -s <service> -w <base64>`),
+/// independent of and smaller than the 128-byte-per-value cap ADR-0001
+/// already fixed. See `KeychainWriter`'s own doc comment for the two
+/// measurements (a longer service/account name shrinks the same budget) and
+/// the proactive `KeychainWriter.Failure.lineTooLong` guard this finding
+/// produced. Dropping the id_token from the payload both obeys constraint 7
+/// and keeps every write comfortably inside that budget - roughly 65% used,
+/// see `KeychainWriter.maxCommandLineLength`'s own doc comment for the exact
+/// figure.
 actor CodexOAuthStore {
     struct Credentials: Sendable, Equatable {
         var accessToken: String

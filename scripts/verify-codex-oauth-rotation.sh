@@ -163,6 +163,21 @@ run_case() {
         'let command = "add-generic-password -U -a \(account) -s \(service) -w \(Self.encode(secret))\n"' \
         'let command = "add-generic-password -U -a \(account) -s \(service) -w \(secret)\n"'
       ;;
+    no-line-length-guard)
+      # The proactive guard is removed - a write whose composed command line
+      # exceeds the measured budget is attempted anyway instead of refused
+      # up front. Scenario 14 specifically checks for `.lineTooLong`, so this
+      # is caught even though the write itself would likely still fail the
+      # existing read-back verification eventually (a slower, less specific
+      # failure this guard exists to shortcut).
+      swap "$dir/KeychainWriter.swift" \
+'        guard command.utf8.count <= Self.maxCommandLineLength else {
+            throw Failure.lineTooLong(length: command.utf8.count, limit: Self.maxCommandLineLength)
+        }' \
+'        if false {
+            throw Failure.lineTooLong(length: command.utf8.count, limit: Self.maxCommandLineLength)
+        }'
+      ;;
     return-unverified-pair)
       swap "$dir/CodexOAuthStore.swift" \
         'throw ProviderFetchError.dataUnavailable(description: "rotated pair failed verification")' \
@@ -243,6 +258,7 @@ run_case "unpromoted pending served without verifying"            serve-unpromot
 run_case "invalid_grant match loosened to any error"              invalid-grant-match-too-loose       || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "constraint 3 regressed: state added to the exchange body" state-added-to-exchange            || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "raw (unencoded) secret sent to security -i"              no-base64-encoding-on-write         || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "proactive line-length guard removed"                     no-line-length-guard                || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then

@@ -410,6 +410,7 @@ private struct ClaudeSignInButton: View {
             switch keychainFailure {
             case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"
             case .failed: return "Sign-in succeeded, but the Keychain didn’t respond - try again"
+            case .lineTooLong: return "Sign-in succeeded, but the saved data was too long for the Keychain - this is a bug, not a retry-and-hope"
             }
         }
         return "Sign-in failed"
@@ -506,6 +507,7 @@ private struct CodexSignInButton: View {
             switch keychainFailure {
             case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"
             case .failed: return "Sign-in succeeded, but the Keychain didn’t respond - try again"
+            case .lineTooLong: return "Sign-in succeeded, but the saved data was too long for the Keychain - this is a bug, not a retry-and-hope"
             }
         }
         return "Sign-in failed"

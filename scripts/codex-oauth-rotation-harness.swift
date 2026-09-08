@@ -443,6 +443,49 @@ func runIDTokenNeverPersistedScenario() async {
     check(!decoded.contains("id_token"), "scenario 13: the stored payload must not even carry an id_token FIELD")
 }
 
+// ------------------------------------------------------------ Scenario 14
+// KeychainWriter must refuse a write whose composed `security -i` command
+// line would exceed the measured stdin-line budget (KeychainWriter's own doc
+// comment) BEFORE attempting it, throwing the specific `.lineTooLong` case -
+// not just eventually failing the post-write read-back with the generic
+// `.verificationFailed`, which sends the next person hunting the wrong cause.
+// A realistic over-length payload (a ~3,000-byte fake access token, well
+// past what any real Codex/Claude token needs) is used, not a synthetic
+// count picked to just clear the threshold - the same "realistic length
+// finds real bugs" lesson scenario 12 already applies.
+
+func runOverLengthPayloadRejectedScenario() async {
+    let account = scratchAccount("over-length")
+    let oversizedAccessToken = String(repeating: "A", count: 3000)
+    let credentials = CodexOAuthStore.Credentials(
+        accessToken: oversizedAccessToken,
+        refreshToken: String(repeating: "R", count: 200),
+        expiresAt: Date.now.addingTimeInterval(3600),
+        accountID: "acct-14"
+    )
+    guard let secret = try? CodexOAuthStore.encode(credentials) else {
+        failures.append("scenario 14: could not encode the oversized credentials")
+        return
+    }
+
+    let writer = KeychainWriter()
+    do {
+        try await writer.write(service: "de.byte.pulse.codex-oauth", account: account, secret: secret)
+        failures.append("scenario 14: a write whose command line exceeds the measured budget must throw, not silently truncate or succeed")
+    } catch let error as KeychainWriter.Failure {
+        guard case .lineTooLong = error else {
+            failures.append("scenario 14: expected .lineTooLong, got \(error) - a generic failure here means the proactive guard did not fire")
+            return
+        }
+        // Confirmed: nothing was actually written for this scratch account -
+        // the guard fired BEFORE the process ever ran.
+        let stored = await readItem(service: "de.byte.pulse.codex-oauth", account: account)
+        check(stored == nil, "scenario 14: a rejected over-length write must leave no item behind")
+    } catch {
+        failures.append("scenario 14: expected KeychainWriter.Failure.lineTooLong, got a different error type: \(error)")
+    }
+}
+
 final class CountBox: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -472,6 +515,7 @@ Task {
     await runConcurrentRotationScenario()
     await runRealisticLengthPayloadScenario()
     await runIDTokenNeverPersistedScenario()
+    await runOverLengthPayloadRejectedScenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {
