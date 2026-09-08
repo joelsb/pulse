@@ -33,6 +33,17 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
     /// jcode's credential store, used only as a fallback when Claude Code's
     /// token is expired. nil when the account has no jcode identity.
     private let jcodeCredentialsStore: JcodeCredentialsStore?
+    /// Pulse's own OAuth grant for this account (JSB-8). nil when the account
+    /// has no Anthropic uuid to key it on. Tried FIRST in `loadLimits()`: it
+    /// is the only source Pulse itself refreshes, so it is the only one that
+    /// does not silently go stale the moment its owning harness stops running.
+    private let pulseOAuthStore: PulseOAuthStore?
+
+    /// Same file `PiAccountResolver` reads by default — not re-derived per
+    /// call, and not a second parser: `loadLimits()` uses
+    /// `PiAccountResolver.readAuth` (the resolver's own static parser) against
+    /// this path, exactly as the resolver itself does internally.
+    private static let piAuthFile = AppPaths.home.appendingPathComponent(".pi/agent/auth.json")
 
     init(
         account: ClaudeAccount,
@@ -42,6 +53,7 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
         jcodeParser: JcodeLogParser? = nil,
         piParser: PiLogParser? = nil,
         piResolver: PiAccountResolver? = nil,
+        pulseOAuthStore: PulseOAuthStore? = nil,
         captureTitles: Bool = true
     ) {
         self.id = account.id
@@ -84,6 +96,7 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
         self.jcodeCredentialsStore = account.jcodeAccountLabels.isEmpty
             ? nil
             : JcodeCredentialsStore()
+        self.pulseOAuthStore = account.accountUUID == nil ? nil : (pulseOAuthStore ?? PulseOAuthStore())
     }
 
     /// This account's credentials as jcode holds them, if any.
@@ -137,6 +150,12 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
         // no Keychain item, and would otherwise render as "not connected"
         // despite having live credentials and parseable logs.
         if jcodeCredentials() != nil { return .available }
+        // An account signed in through Pulse's own OAuth (JSB-8) and nothing
+        // else — no Claude Code, no jcode — is the case this whole feature
+        // exists for, and must not read as "not connected".
+        if let accountUUID, let pulseOAuthStore, await pulseOAuthStore.hasGrant(forAccountUUID: accountUUID) {
+            return .available
+        }
         return .notConnected(hint: descriptor.setupHint)
     }
 
@@ -218,67 +237,126 @@ actor ClaudeProvider: UsageProvider, ProjectBreakdownProviding {
         var windows: Result<ClaudeUsageResponse, ProviderFetchError>
     }
 
-    /// Loads credentials (5-minute in-actor cache) and calls the usage
-    /// endpoint. On 401 the cache is invalidated and the call retried once
-    /// with freshly read credentials — Claude Code may have rotated the token
-    /// since the cache filled; Pulse never refreshes tokens itself. A 401
-    /// with an unchanged token stays `.unauthorized`.
-    private func loadLimits() async -> Limits {
+    /// Where a candidate token came from, kept only for the retry chain below
+    /// (never surfaced to the UI — the card just says "stale" or "expired",
+    /// not which store answered).
+    private enum CredentialSource: Sendable { case pulse, claudeCode, jcode, pi }
+
+    private struct Candidate: Sendable {
+        var source: CredentialSource
         var credentials: ClaudeCredentials
+    }
+
+    /// Picks a token to call the usage endpoint with, tries it, and retries
+    /// down the freshest-first list on a 401 — generalizing what used to be a
+    /// single Claude-Code-vs-jcode fallback into N sources, in this order of
+    /// preference:
+    ///
+    /// 1. **Pulse's own grant** (JSB-8) — the only source Pulse itself
+    ///    refreshes, proactively, inside 300s of expiry. Tried first
+    ///    regardless of the others' freshness: it is never going to be
+    ///    hours-stale the way a harness-owned copy routinely is.
+    /// 2. **The freshest NON-EXPIRED token** among Claude Code's own
+    ///    Keychain/file store, jcode's `auth.json`, and pi's `auth.json`
+    ///    (read through `PiAccountResolver.readAuth` — the resolver's own
+    ///    parser, not a second one). "Freshest" = furthest `expiresAt`, since
+    ///    none of these carry an issued-at timestamp to compare instead.
+    ///
+    /// An already-expired token is never even attempted: sending one wastes a
+    /// request and, repeated every refresh tick, gets the endpoint to
+    /// rate-limit the account (observed 2026-08-28, HTTP 429 with
+    /// Retry-After 2808) — the exact failure mode this whole feature exists
+    /// to end.
+    private func loadLimits() async -> Limits {
+        var claudeCodeError: ProviderFetchError?
+        let claudeCodeCredentials: ClaudeCredentials?
         do {
-            credentials = try await credentialsStore.credentials()
+            claudeCodeCredentials = try await credentialsStore.credentials()
         } catch {
-            // Claude Code has no usable token. jcode may still hold a live one
-            // for the same account, so a hard failure here is premature.
-            if let fallback = jcodeCredentials(), !fallback.isExpired() {
-                credentials = fallback
-            } else {
-                return Limits(plan: nil, windows: .failure(Self.asFetchError(error)))
-            }
+            claudeCodeCredentials = nil
+            claudeCodeError = Self.asFetchError(error)
         }
 
-        // Claude Code only refreshes when Claude Code runs, so its token is
-        // routinely hours stale while jcode's copy of the same account is
-        // current. Prefer whichever store actually holds a valid token rather
-        // than a fixed order: sending the expired one wastes a request and,
-        // repeated every refresh tick, gets the endpoint to rate-limit the
-        // account (observed 2026-08-28, HTTP 429 with Retry-After 2808).
-        if credentials.isExpired(), let fallback = jcodeCredentials(), !fallback.isExpired() {
-            credentials = ClaudeCredentials(
-                accessToken: fallback.accessToken,
-                expiresAt: fallback.expiresAt,
-                // jcode records no plan, so keep the Keychain's label: the
-                // token is stale but the plan it names is not.
-                subscriptionType: credentials.subscriptionType,
-                rateLimitTier: credentials.rateLimitTier
+        var candidates = await freshCandidates(claudeCodeCredentials: claudeCodeCredentials)
+        candidates.sort { ($0.credentials.expiresAt ?? 0) > ($1.credentials.expiresAt ?? 0) }
+        // Pulse's own grant always leads, even over a harness token that
+        // happens to expire further in the future — see the doc comment.
+        if let pulseIndex = candidates.firstIndex(where: { $0.source == .pulse }), pulseIndex != 0 {
+            candidates.insert(candidates.remove(at: pulseIndex), at: 0)
+        }
+
+        guard let winner = candidates.first else {
+            // Nothing at all is usable anywhere. Surface Claude Code's own
+            // failure when there was one — it is the most actionable message
+            // an account with no live token anywhere can show; otherwise its
+            // (unexpired-but-rejected-earlier is impossible here, so this
+            // means genuinely expired) plan label still names the account.
+            return Limits(
+                plan: claudeCodeCredentials?.planLabel,
+                windows: .failure(claudeCodeError ?? .unauthorized)
             )
         }
+        return await fetchLimits(candidates: Array(candidates.dropFirst()), winner: winner, planFallback: claudeCodeCredentials)
+    }
 
-        do {
-            let response = try await api.fetchUsage(accessToken: credentials.accessToken)
-            return Limits(plan: credentials.planLabel, windows: .success(response))
-        } catch ProviderFetchError.unauthorized {
-            await credentialsStore.invalidate()
-            do {
-                let fresh = try await credentialsStore.credentials(forceReload: true)
-                guard fresh.accessToken != credentials.accessToken else {
-                    // Claude Code's token is unchanged and rejected. jcode is
-                    // the only remaining chance at a live token.
-                    if let fallback = jcodeCredentials(),
-                       !fallback.isExpired(),
-                       fallback.accessToken != credentials.accessToken {
-                        let response = try await api.fetchUsage(accessToken: fallback.accessToken)
-                        return Limits(plan: fresh.planLabel, windows: .success(response))
-                    }
-                    return Limits(plan: fresh.planLabel, windows: .failure(.unauthorized))
+    /// Every source that currently holds a token this account could use,
+    /// UNFILTERED by expiry — `loadLimits()` filters and orders them.
+    private func freshCandidates(claudeCodeCredentials: ClaudeCredentials?) async -> [Candidate] {
+        var result: [Candidate] = []
+
+        if let accountUUID, let pulseOAuthStore,
+           let pulse = await pulseOAuthStore.credentials(forAccountUUID: accountUUID) {
+            // `PulseOAuthStore.credentials` already refreses and already
+            // excludes an expired result, so this candidate is never expired
+            // by construction.
+            result.append(Candidate(source: .pulse, credentials: ClaudeCredentials(
+                accessToken: pulse.accessToken,
+                expiresAt: pulse.expiresAt.timeIntervalSince1970 * 1000,
+                subscriptionType: nil,
+                rateLimitTier: nil
+            )))
+        }
+        if let claudeCodeCredentials, !claudeCodeCredentials.isExpired() {
+            result.append(Candidate(source: .claudeCode, credentials: claudeCodeCredentials))
+        }
+        if let jcode = jcodeCredentials(), !jcode.isExpired() {
+            result.append(Candidate(source: .jcode, credentials: jcode))
+        }
+        if let accountUUID, let piResolver {
+            let resolved = await piResolver.resolveAll()
+            let keys = resolved.filter { $0.value.accountUUID == accountUUID }.keys
+            if !keys.isEmpty {
+                let piCredentials = PiAccountResolver.readAuth(Self.piAuthFile)
+                if let key = keys.first(where: { piCredentials[$0]?.isExpired == false }),
+                   let credential = piCredentials[key] {
+                    result.append(Candidate(source: .pi, credentials: ClaudeCredentials(
+                        accessToken: credential.accessToken,
+                        expiresAt: credential.expiresAt,
+                        subscriptionType: nil,
+                        rateLimitTier: nil
+                    )))
                 }
-                let response = try await api.fetchUsage(accessToken: fresh.accessToken)
-                return Limits(plan: fresh.planLabel, windows: .success(response))
-            } catch {
-                return Limits(plan: credentials.planLabel, windows: .failure(Self.asFetchError(error)))
             }
+        }
+        return result
+    }
+
+    /// Calls the usage endpoint with `winner`, falling through the remaining
+    /// `candidates` (already freshest-first) on a 401 — a token that looked
+    /// unexpired can still be rejected (revoked, clock skew), and the next
+    /// candidate is a genuinely different token, not a re-read of the same one.
+    private func fetchLimits(candidates: [Candidate], winner: Candidate, planFallback: ClaudeCredentials?) async -> Limits {
+        let plan = winner.credentials.planLabel ?? planFallback?.planLabel
+        do {
+            let response = try await api.fetchUsage(accessToken: winner.credentials.accessToken)
+            return Limits(plan: plan, windows: .success(response))
+        } catch ProviderFetchError.unauthorized {
+            guard let next = candidates.first else {
+                return Limits(plan: plan, windows: .failure(.unauthorized))
+            }
+            return await fetchLimits(candidates: Array(candidates.dropFirst()), winner: next, planFallback: planFallback)
         } catch {
-            return Limits(plan: credentials.planLabel, windows: .failure(Self.asFetchError(error)))
+            return Limits(plan: plan, windows: .failure(Self.asFetchError(error)))
         }
     }
 

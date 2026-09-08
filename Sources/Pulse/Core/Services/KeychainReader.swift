@@ -37,13 +37,24 @@ struct KeychainReader: Sendable {
 
     /// Reads the password for a generic-password item. The generous default
     /// timeout leaves room for the user to answer the one-time approval dialog.
-    func readGenericPassword(service: String, timeout: TimeInterval = 90) async throws -> String {
+    ///
+    /// `account` narrows the match to one `-a` value — needed the moment a
+    /// single `service` holds more than one item (Pulse's OAuth store keys
+    /// every account's grant under one service, `de.byte.pulse.oauth`,
+    /// distinguished only by account). Omitted, `security` returns whichever
+    /// item it finds first for that service, which is fine for every
+    /// existing caller (one item per service) and wrong for that one.
+    func readGenericPassword(service: String, account: String? = nil, timeout: TimeInterval = 90) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let box = OnceBox()
 
+            var arguments = ["find-generic-password", "-s", service]
+            if let account { arguments += ["-a", account] }
+            arguments.append("-w")
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            process.arguments = ["find-generic-password", "-s", service, "-w"]
+            process.arguments = arguments
             process.standardOutput = Pipe()
             process.standardError = Pipe()
 

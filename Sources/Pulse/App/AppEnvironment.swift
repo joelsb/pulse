@@ -9,6 +9,10 @@ final class AppEnvironment {
     let history: HistoryStore
     let providers: [any UsageProvider]
     let scheduler: RefreshScheduler
+    /// Pulse's own Claude OAuth grants (JSB-8) — shared with every
+    /// `ClaudeProvider`, so a sign-in from Settings is visible to the same
+    /// object the next refresh reads from.
+    let pulseOAuthStore: PulseOAuthStore
     /// On-demand per-project/session analytics for the breakdown window. Shares
     /// the provider instances (and their warm caches) with the scheduler.
     let projectUsage: ProjectUsageService
@@ -30,11 +34,13 @@ final class AppEnvironment {
         let settings = SettingsStore()
         let store = UsageStore()
         let history = HistoryStore()
-        let providers = ProviderFactory.makeAll(captureTitles: settings.useSessionTitles)
+        let pulseOAuthStore = PulseOAuthStore()
+        let providers = ProviderFactory.makeAll(captureTitles: settings.useSessionTitles, pulseOAuthStore: pulseOAuthStore)
 
         self.settings = settings
         self.store = store
         self.history = history
+        self.pulseOAuthStore = pulseOAuthStore
         self.providers = providers
         self.scheduler = RefreshScheduler(
             providers: providers,
