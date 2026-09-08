@@ -36,7 +36,7 @@ struct HTTPClient: Sendable {
         return try await send(request)
     }
 
-    func postRaw(_ url: URL, headers: [String: String] = [:], jsonBody: Data? = nil) async throws -> (status: Int, data: Data) {
+    func postRaw(_ url: URL, headers: [String: String] = [:], jsonBody: Data? = nil) async throws -> (status: Int, data: Data, response: HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
@@ -47,15 +47,17 @@ struct HTTPClient: Sendable {
         return try await sendRaw(request)
     }
 
-    /// Sends a request and returns the status and raw body WITHOUT collapsing
-    /// a non-2xx status into the coarse `ProviderFetchError` taxonomy `send`
-    /// uses — for the rare caller that has to read the response BODY to tell
-    /// two failures apart (e.g. `ClaudeOAuthClient` distinguishing a dead
-    /// refresh token's `400 {"error":"invalid_grant"}` from every other 400,
-    /// which `send` cannot do because it discards the body before throwing).
+    /// Sends a request and returns the status, raw body AND the response
+    /// WITHOUT collapsing a non-2xx status into the coarse
+    /// `ProviderFetchError` taxonomy `send` uses — for the rare caller that
+    /// has to read the response BODY to tell two failures apart (e.g.
+    /// `ClaudeOAuthClient` distinguishing a dead refresh token's
+    /// `400 {"error":"invalid_grant"}` from every other 400, which `send`
+    /// cannot do because it discards the body before throwing) or needs a
+    /// HEADER `send` would also have discarded (e.g. `Retry-After` on a 429).
     /// Transport failures and cancellation still throw, same as `send`; only
     /// status-code handling is left to the caller.
-    func sendRaw(_ request: URLRequest) async throws -> (status: Int, data: Data) {
+    func sendRaw(_ request: URLRequest) async throws -> (status: Int, data: Data, response: HTTPURLResponse) {
         let data: Data
         let response: URLResponse
         do {
@@ -70,7 +72,7 @@ struct HTTPClient: Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw ProviderFetchError.network(description: "Non-HTTP response")
         }
-        return (http.statusCode, data)
+        return (http.statusCode, data, http)
     }
 
     /// Sends a request, mapping transport errors and non-2xx statuses to

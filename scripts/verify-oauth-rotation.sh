@@ -28,6 +28,19 @@
 # and the `dead-grant-too-broad` defect to guard the distinction going
 # forward.
 #
+# The SAME round found two more gaps: (1) the round-1 B2 fix only protected
+# the one tick that ran a failed rotation - the very next call would find the
+# unverified pair sitting in `-pending` looking FRESHER than primary and
+# serve it, unverified, for its whole ~8h life. Fixed by treating an
+# "unpromoted pending" pair (fresher than primary, different content) as
+# provisional: verified once before being served, promoted on success,
+# refused on failure. Scenario 8 and the `serve-unpromoted-pending-unverified`
+# defect guard it. (2) `ClaudeOAuthClient.tokenEndpointError` - the ONE
+# function deciding whether a 400 deletes a grant - had NO test anywhere;
+# scenarios 5/6 only exercised its CALLERS with already-classified values.
+# Scenario 7 calls the real static function directly, and the
+# `invalid-grant-match-too-loose` defect guards the string comparison itself.
+#
 # This runs against the REAL Keychain, using scratch account names
 # (`harness-scratch-...`) that are never read by production code and are
 # deleted at the end of every run, pass or fail.
@@ -69,9 +82,11 @@ SOURCES=(
   "Sources/Pulse/Core/Services/Formatters.swift"
   "Sources/Pulse/Core/Services/KeychainReader.swift"
   "Sources/Pulse/Core/Services/KeychainWriter.swift"
+  "Sources/Pulse/Core/Services/AppPaths.swift"
   "Sources/Pulse/Providers/Claude/ClaudeOAuthClient.swift"
   "Sources/Pulse/Providers/Claude/ClaudeUsageAPI.swift"
   "Sources/Pulse/Providers/Claude/PulseOAuthStore.swift"
+  "Sources/Pulse/Providers/Pi/PiAccountResolver.swift"
 )
 HARNESS="scripts/oauth-rotation-harness.swift"
 
@@ -150,8 +165,32 @@ run_case() {
       # Reads pick the STALER item instead of the freshest one - the exact
       # inversion of what read() must do.
       swap "$dir/PulseOAuthStore.swift" \
-        'return pending.expiresAt >= primary.expiresAt ? pending : primary' \
-        'return pending.expiresAt >= primary.expiresAt ? primary : pending'
+'            if pending.expiresAt >= primary.expiresAt {
+                return (pending, pending.accessToken != primary.accessToken)
+            }
+            return (primary, false)' \
+'            if pending.expiresAt >= primary.expiresAt {
+                return (primary, false)
+            }
+            return (pending, pending.accessToken != primary.accessToken)'
+      ;;
+    serve-unpromoted-pending-unverified)
+      # R2-B1 regression: an unpromoted pending pair (fresher than primary,
+      # never proven to work) is served without verifying it first - the
+      # exact bug scenario 8 exists to catch.
+      swap "$dir/PulseOAuthStore.swift" \
+'        if picked.isUnpromotedPending {
+            guard await verifies(current) else { return nil }' \
+'        if picked.isUnpromotedPending {
+            _ = await verifies(current)'
+      ;;
+    invalid-grant-match-too-loose)
+      # R2-B2 regression: any non-empty error field classifies as
+      # invalid_grant, not just the exact spec string - round 2's original
+      # bug restored (any 400 with any error field deletes the grant).
+      swap "$dir/ClaudeOAuthClient.swift" \
+        'errorField.trimmingCharacters(in: .whitespaces).lowercased() == "invalid_grant"' \
+        '!errorField.isEmpty'
       ;;
     return-unverified-pair)
       # B2 regression: hands the caller a pair that failed verification,
@@ -240,6 +279,8 @@ run_case "read prefers the staler item over the fresher one"     pending-not-pre
 run_case "B2 regressed: unverified pair returned to the caller"  return-unverified-pair   || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "B1 regressed: a dead grant is never marked or cleared" no-dead-grant-detection  || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "B1 too broad: any 400 marked dead, not just invalid_grant" dead-grant-too-broad  || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "R2-B1 regressed: unpromoted pending served without verifying" serve-unpromoted-pending-unverified || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "R2-B2 regressed: invalid_grant match loosened to any error"   invalid-grant-match-too-loose      || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then

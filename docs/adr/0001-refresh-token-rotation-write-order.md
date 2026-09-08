@@ -109,6 +109,35 @@ step 1 actually protective instead of just an unread backup file, in the
 `rotate` path where it matters most, while also handling `signIn`'s directly-
 written pair correctly (see "Decision" above).
 
+## Pending is provisional until proven, not just until promoted (R2-B1)
+
+Picking the freshest item by `expires_at` (previous section) is necessary but
+NOT sufficient: `rotate` writes `-pending` BEFORE it calls `verifies()`, so a
+rotation whose verification fails leaves a pair in `-pending` that is fresh
+(a full ~8h `expires_at`) and completely UNPROVEN. Review round 2 (2026-09-08)
+found that the round-1 fix for this (throw instead of returning the unverified
+pair — see the "Consequences" bullet below) only protected the ONE call that
+ran the failed rotation. The very next `credentials(forAccountUUID:)` call
+would pick that same pending pair (fresher than primary by `expires_at`), see
+`needsRefresh() == false` on it (nothing about an ~8h-out pair looks like it
+needs refreshing), never call `rotate`/`verifies` again, and serve the
+unverified pair — pinned by `ClaudeProvider` ahead of every working harness
+token — for its entire ~8h life. Two docs and the shell harness's own
+relaunch assertion stated the opposite of this as settled behaviour; all
+three were wrong until this fix.
+
+The fix: `read()` reports not just which pair it picked but whether that pair
+came from `-pending` while DIFFERING from primary (`isUnpromotedPending`) —
+that is the signature of "written by a rotation, never proven". On that path,
+`credentials(forAccountUUID:)` calls `verifies()` once before handing the pair
+out: success promotes it into primary (so every later call skips the extra
+`/oauth/usage` call — pending now equals primary, no longer "unpromoted");
+failure refuses the pair outright (`nil`) rather than falling back to
+primary's near-expiry old pair, which is what was already about to need
+rotating in the first place. Bounded per call: at most one extra verification
+request, and only until the pair is either promoted or the account signs in
+again.
+
 ## Dead grants are terminal, not retried
 
 `400 invalid_grant` on the REFRESH call (not the verification step — a
@@ -123,12 +152,43 @@ for `~/.claude`'s HTTP 429 (a live credential problem earning a rate limit
 that then blocks the live credential), reintroduced on the token endpoint by
 the very feature meant to end it.
 
-`PulseOAuthStore` now marks the account in an in-memory `deadGrants` set on a
-`400` from the refresh call specifically, and deletes both Keychain items for
-that uuid (`KeychainWriter.delete`) so the dead state is durable across a
-relaunch too — not just refused in memory. `credentials(forAccountUUID:)` and
-`hasGrant(forAccountUUID:)` both refuse a dead account outright. A fresh
-`signIn` for the same uuid clears the mark.
+`PulseOAuthStore` now marks the account in an in-memory `deadGrants` set on
+`invalid_grant` from the refresh call SPECIFICALLY — not on "any `400`", which
+was review round 2's own finding about the round-1 version of this exact fix
+(see "Only `invalid_grant` is terminal" below) — and deletes both Keychain
+items for that uuid (`KeychainWriter.delete`) so the dead state is durable
+across a relaunch too, not just refused in memory. `credentials(forAccountUUID:)`
+and `hasGrant(forAccountUUID:)` both refuse a dead account outright. A fresh
+`signIn` for the same uuid clears the mark — BEFORE either Keychain write, not
+after (R2-S4), so a browser round trip that succeeded is not left shadowed by
+a stale mark if either write then fails.
+
+## Only `invalid_grant` is terminal — every other failure is bounded, not deleted
+
+Review round 2 (2026-09-08) found the round-1 version of the section above too
+BROAD: it matched `ProviderFetchError.http(400)`, which is what `HTTPClient.send`
+produced for EVERY `400` alike (status only, body already discarded before the
+throw) — so any 400 unrelated to the refresh token being dead (a malformed
+body after a future API change, a changed required parameter, a provider-side
+validation hiccup) permanently destroyed a working grant.
+
+The fix reads the response BODY (`ClaudeOAuthClient.TokenEndpointError`, via
+`HTTPClient.postRaw`/`sendRaw`, additive — `send` and every other caller are
+unchanged) and marks dead ONLY when the body's `error` field is, normalised,
+exactly `invalid_grant` — the RFC 6749 §5.2 shape, and the exact string proven
+live (see "What forced it"). Every other outcome of the refresh call — a 401,
+a network failure, a 429, a 5xx, or a 400 that is NOT `invalid_grant` (a
+retired/rotated `client_id` returns `400 {"error":"invalid_client"}` per the
+same RFC section, which is also permanent but is not a dead REFRESH TOKEN) —
+is treated as transient in the sense that it is not proven-dead. But
+"transient" must not mean "retried every tick forever with no backoff", which
+is the SAME failure shape one error class narrower. `PulseOAuthStore` bounds
+this separately: `consecutiveRefreshFailures` counts non-`invalid_grant`
+refresh failures per account, resets on any successful refresh call, and once
+it passes `maxConsecutiveRefreshFailures` (3), `credentials(forAccountUUID:)`
+stops attempting a rotation for that account for the rest of the run — no
+Keychain deletion, no `deadGrants` entry, because the failure was never proven
+permanent, only proven not worth asking about again this run.
 
 ## Why rotation is coalesced, not just hoped to be single-caller
 
@@ -150,6 +210,20 @@ directly: `PulseOAuthStore` now coalesces concurrent rotation attempts for
 the same uuid onto one in-flight `Task`, so the invariant holds even if
 either of those two external facts changes later.
 
+**Coalescing alone is not sufficient (R2-S3, review round 2).** The in-flight
+entry is removed as soon as its `Task` completes. A caller that read a
+pre-rotation `current` BEFORE a winner started, but only reaches `rotate`
+AFTER the winner's entry is already cleared, is SEQUENTIAL, not concurrent —
+invisible to the in-flight dictionary. That caller would resend the
+already-spent refresh token, get `invalid_grant`, and — after the dead-grant
+fix above — delete the Keychain items holding the pair the winner had just
+promoted: a burned-grant bug turned into a working-grant DELETION. Closed with
+the repo's own fingerprint-not-token pattern (`PiAccountResolver.fingerprint`,
+reused rather than re-implemented): `spentRefreshFingerprints` records every
+refresh token `rotate` has attempted to spend THIS run, checked and inserted
+before the network call, so a second attempt with the same token — concurrent
+or sequential — is refused before it ever reaches the endpoint.
+
 ## Consequences
 
 - Every successful rotation leaves `-pending` holding the same content as the
@@ -161,19 +235,25 @@ either of those two external facts changes later.
   lifetime (~8h) per account, so this is negligible against the 30s–5min
   refresh-loop cadence the rest of the app runs at.
 - A rotation whose verification fails (network blip, endpoint hiccup, or any
-  transient error other than `400` on the refresh call itself) makes `rotate`
-  THROW rather than return the unverified pair — review round 1 (2026-09-08)
-  found the first version returned it, which let `ClaudeProvider` pin an
-  unverified, possibly-broken credential ahead of a working harness token.
-  `credentials(forAccountUUID:)` swallows that throw (`try?`) and keeps
-  serving the OLD pair for that call; the next caller that needs a fresh
-  token tries the rotation again, and finds the ALREADY-rotated pair waiting
-  in `-pending` rather than re-spending the (already-spent) refresh token.
-  The old access token remains usable until its own natural expiry regardless
-  of what happened to the refresh token, so this costs nothing except
-  deferring the rotation, never a dropped grant.
-- A rotation whose refresh call itself returns `400` is the one outcome that
-  is NOT retried at all — see "Dead grants are terminal, not retried" above.
+  transient error other than `invalid_grant` on the refresh call itself)
+  makes `rotate` THROW rather than return the unverified pair — review round 1
+  (2026-09-08) found the first version returned it, which let `ClaudeProvider`
+  pin an unverified, possibly-broken credential ahead of a working harness
+  token. `credentials(forAccountUUID:)` swallows that throw (`try?`) and keeps
+  serving the OLD pair for THAT call. The pair that failed verification stays
+  in `-pending`, UNVERIFIED — the next call does NOT trigger a fresh rotation
+  (review round 2 found and fixed this: an ~8h-out pending pair never looks
+  like it "needs refreshing"). Instead it re-verifies that SAME pending pair
+  once before serving it, without spending another refresh token — see
+  "Pending is provisional until proven, not just until promoted (R2-B1)"
+  above. The old access token remains usable until its own natural expiry
+  regardless of what happened to the refresh token, so none of this costs a
+  dropped grant, only a deferred promotion.
+- A rotation whose refresh call itself fails with `invalid_grant` is the one
+  outcome that is NOT retried at all — see "Dead grants are terminal, not
+  retried" above. Every OTHER refresh failure (including a `400` that is NOT
+  `invalid_grant`) IS retried, up to `maxConsecutiveRefreshFailures` times per
+  run — see "Only `invalid_grant` is terminal" above.
 
 ## Rejected alternatives
 
@@ -207,3 +287,13 @@ either of those two external facts changes later.
   pair, not the unverified new one (review round 1's B2 finding: the
   original harness discarded that return value, so all four defects could
   pass while this property was untested).
+- Same file, review round 2 additions: a non-`invalid_grant` `400` must NOT
+  delete a working grant (`dead-grant-too-broad` defect); an unpromoted
+  pending pair must be verified before being served, never served on the
+  strength of `expires_at` alone (`serve-unpromoted-pending-unverified`
+  defect, scenario 8); and `ClaudeOAuthClient.tokenEndpointError` — the ONE
+  function deciding whether a `400` deletes a grant — is exercised DIRECTLY
+  (scenario 7, plus a real `swift test` suite in `ClaudeOAuthTests.swift`),
+  after review round 2 found the shell harness only ever threw
+  already-classified values and so never ran the classifier itself
+  (`invalid-grant-match-too-loose` defect).

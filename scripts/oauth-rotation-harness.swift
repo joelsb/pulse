@@ -68,6 +68,19 @@ func seed(account: String, tokens: ClaudeOAuthClient.TokenPair) async throws {
     try await writer.write(service: "de.byte.pulse.oauth-pending", account: account, secret: secret)
 }
 
+/// Seeds exactly ONE service, unlike `seed(account:tokens:)` which seeds
+/// both identically — needed to construct an "unpromoted pending" state
+/// directly (primary and pending genuinely different) without going through
+/// a real rotation.
+func seedItem(service: String, account: String, tokens: ClaudeOAuthClient.TokenPair) async throws {
+    let writer = KeychainWriter()
+    let credentials = PulseOAuthStore.Credentials(
+        accessToken: tokens.accessToken, refreshToken: tokens.refreshToken,
+        expiresAt: tokens.expiresAt, grantedScope: tokens.grantedScope
+    )
+    try await writer.write(service: service, account: account, secret: try PulseOAuthStore.encode(credentials))
+}
+
 func readItem(service: String, account: String) async -> PulseOAuthStore.Credentials? {
     let reader = KeychainReader()
     guard let secret = try? await reader.readGenericPassword(service: service, account: account) else { return nil }
@@ -208,7 +221,12 @@ func runDeadGrantScenario() async {
         throw ClaudeOAuthClient.TokenEndpointError.invalidGrant
     })
 
-    _ = await store.credentials(forAccountUUID: account)
+    // The FIRST call still returns the still-valid (not yet expired) old
+    // access token, even though the rotation attempt inside it just proved
+    // the account dead - an access token outlives its refresh token, and
+    // this one call's caller is not left with nothing (round 2 nit 4).
+    let firstCallResult = await store.credentials(forAccountUUID: account)
+    checkEqual(firstCallResult?.accessToken, "OLD-AT-5", "scenario 5: the FIRST call, mid-rotation, must still return the still-valid old access token")
     let deadAfterFirstCall = await !store.hasGrant(forAccountUUID: account)
     check(deadAfterFirstCall, "scenario 5: hasGrant must report false once invalid_grant has been seen for this account")
 
@@ -265,6 +283,93 @@ func runNonInvalidGrant400Scenario() async {
     check(pendingAfter?.accessToken == "OLD-AT-6", "scenario 6: a non-invalid_grant 400 must NOT delete the pending Keychain item")
 }
 
+// ------------------------------------------------------------ Scenario 7 (R2-B2)
+// `ClaudeOAuthClient.tokenEndpointError(status:body:)` is the ONE function
+// deciding whether a 400 deletes both of an account's Keychain items. Review
+// round 2 (2026-09-08) found NOTHING exercised it directly: scenarios 5 and 6
+// throw already-classified `TokenEndpointError` values from `refreshOverride`,
+// so a defect planted directly in the classifier - drop the `status == 400`
+// guard, or loosen the string compare - passed all 7 prior scenarios. This
+// calls the real static function with the five cases the review specified.
+
+func runTokenEndpointErrorScenario() {
+    checkEqual(
+        ClaudeOAuthClient.tokenEndpointError(
+            status: 400,
+            body: Data(#"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#.utf8)
+        ),
+        .invalidGrant,
+        "scenario 7: a 400 with error=invalid_grant must classify as invalidGrant"
+    )
+    checkEqual(
+        ClaudeOAuthClient.tokenEndpointError(status: 400, body: Data(#"{"error":"invalid_request"}"#.utf8)),
+        .other(status: 400),
+        "scenario 7: a 400 with a DIFFERENT error field must classify as other(400), never invalidGrant"
+    )
+    checkEqual(
+        ClaudeOAuthClient.tokenEndpointError(status: 400, body: Data("<html>cloudflare</html>".utf8)),
+        .other(status: 400),
+        "scenario 7: a 400 with a non-JSON body must classify as other(400)"
+    )
+    checkEqual(
+        ClaudeOAuthClient.tokenEndpointError(status: 400, body: Data()),
+        .other(status: 400),
+        "scenario 7: a 400 with an empty body must classify as other(400)"
+    )
+    checkEqual(
+        ClaudeOAuthClient.tokenEndpointError(status: 500, body: Data(#"{"error":"invalid_grant"}"#.utf8)),
+        .other(status: 500),
+        "scenario 7: error=invalid_grant at a NON-400 status must classify as other(status), never invalidGrant"
+    )
+}
+
+// ------------------------------------------------------------ Scenario 8 (R2-B1)
+// An unpromoted `-pending` pair (fresher than primary, different content -
+// exactly what a previously-failed-verification rotation leaves behind) must
+// be verified ONCE before being served, and promoted into primary only on
+// success. Round 2 found the first B2 fix only protected the ONE tick that
+// ran the failed rotation: the very next call found pending fresher by
+// `expiresAt`, never called `needsRefresh()`/`rotate` again (no reason to,
+// pending isn't expiring soon), and served the unverified pair for its
+// entire ~8h life.
+
+func runUnpromotedPendingScenario() async {
+    let oldPrimary = pair(access: "OLD-AT-8", refresh: "OLD-RT-8", expiresIn: 60)
+    let unpromotedPending = pair(access: "UNVERIFIED-AT-8", refresh: "UNVERIFIED-RT-8", expiresIn: 28800)
+
+    // Half 1: verification succeeds - must promote and serve the pair.
+    let successAccount = scratchAccount("unpromoted-pending-ok")
+    do {
+        try await seedItem(service: "de.byte.pulse.oauth", account: successAccount, tokens: oldPrimary)
+        try await seedItem(service: "de.byte.pulse.oauth-pending", account: successAccount, tokens: unpromotedPending)
+    } catch {
+        failures.append("scenario 8: seeding (success half) failed: \(error)")
+        return
+    }
+    let successStore = PulseOAuthStore(verifyOverride: { _ in true })
+    let successResult = await successStore.credentials(forAccountUUID: successAccount)
+    checkEqual(successResult?.accessToken, "UNVERIFIED-AT-8", "scenario 8: a verified unpromoted pending pair must be served")
+    let primaryAfterSuccess = await readItem(service: "de.byte.pulse.oauth", account: successAccount)
+    checkEqual(primaryAfterSuccess?.accessToken, "UNVERIFIED-AT-8", "scenario 8: a verified unpromoted pending pair must be promoted into primary")
+
+    // Half 2: verification fails - must be refused outright, and must NOT
+    // promote the bad pair into primary. A separate account, so the two
+    // halves' Keychain state can never interfere with each other.
+    let failAccount = scratchAccount("unpromoted-pending-fails")
+    do {
+        try await seedItem(service: "de.byte.pulse.oauth", account: failAccount, tokens: oldPrimary)
+        try await seedItem(service: "de.byte.pulse.oauth-pending", account: failAccount, tokens: unpromotedPending)
+    } catch {
+        failures.append("scenario 8: seeding (failure half) failed: \(error)")
+        return
+    }
+    let failStore = PulseOAuthStore(verifyOverride: { _ in false })
+    let failResult = await failStore.credentials(forAccountUUID: failAccount)
+    check(failResult == nil, "scenario 8: an unpromoted pending pair that fails verification must be refused, not served")
+    let primaryAfterFail = await readItem(service: "de.byte.pulse.oauth", account: failAccount)
+    checkEqual(primaryAfterFail?.accessToken, "OLD-AT-8", "scenario 8: a failed verification must NOT promote the bad pair into primary")
+}
+
 /// A locked counter, since the refresh override runs off-actor and Swift 6
 /// won't let a plain closure mutate a captured `var` across that boundary.
 final class CountBox: @unchecked Sendable {
@@ -291,6 +396,8 @@ Task {
     await runNoRotationWhenFreshScenario()
     await runDeadGrantScenario()
     await runNonInvalidGrant400Scenario()
+    runTokenEndpointErrorScenario()
+    await runUnpromotedPendingScenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {

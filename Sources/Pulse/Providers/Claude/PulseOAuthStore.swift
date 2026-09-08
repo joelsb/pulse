@@ -64,6 +64,31 @@ actor PulseOAuthStore {
     /// keeps one provider's `fetch()` from overlapping itself. Coalescing
     /// here removes the dependency on both staying true.
     private var inFlightRotations: [String: Task<Credentials?, Never>] = [:]
+    /// Bounds retrying a refresh call that fails for a reason OTHER than
+    /// `invalid_grant` (R2-S1) — a retired/rotated `client_id`
+    /// (`400 {"error":"invalid_client"}`, permanent but not `invalid_grant`),
+    /// a persistent 5xx, or anything else this run has no way to fix by
+    /// asking again. Without a cap, that POSTs to the Cloudflare-fronted
+    /// token endpoint every refresh tick forever with the failure swallowed
+    /// by `try?` — the same self-renewing-penalty shape B1 was about,
+    /// one error class narrower. Deliberately NOT `deadGrants`/`clearGrant`:
+    /// this is "stop asking THIS run", not "the grant is proven dead" — a
+    /// `client_id` rotation, for instance, fixes itself on the next app
+    /// update with no re-sign-in needed, so nothing here is deleted.
+    private var consecutiveRefreshFailures: [String: Int] = [:]
+    private static let maxConsecutiveRefreshFailures = 3
+    /// Refuses to spend the same refresh token twice in one run (R2-S3).
+    /// Coalescing (`inFlightRotations`) only protects callers that overlap
+    /// IN TIME; a caller that read a pre-rotation `current` before a winner
+    /// started, but only reaches `rotateCoalesced` after the winner's entry
+    /// was already cleared, is sequential, not concurrent, and coalescing
+    /// does not see it. That caller would resend an already-spent refresh
+    /// token, get `invalid_grant`, and (after B1) delete the Keychain items
+    /// holding the pair the winner just promoted — turning a burned-grant
+    /// bug into a working-grant DELETION. Keyed on a fingerprint
+    /// (`PiAccountResolver.fingerprint`, the repo's existing token-identity-
+    /// without-the-token pattern), never the token itself.
+    private var spentRefreshFingerprints: Set<String> = []
 
     init(
         keychain: KeychainReader = KeychainReader(),
@@ -104,12 +129,18 @@ actor PulseOAuthStore {
         // to the new grant. Either order recovers under the new `read()`; this
         // order is kept so the single rule "pending is written no later than
         // primary" holds everywhere instead of varying by call site.
+        // Cleared BEFORE either persist, not after (R2-S4): a browser round
+        // trip that reached this point already proves the dead mark is
+        // obsolete, regardless of whether either Keychain write then
+        // succeeds. The first version cleared it last, so a write that threw
+        // (a `KeychainWriter` verification failure, a timeout) left a LIVE
+        // grant sitting in the Keychain while `credentials`/`hasGrant` kept
+        // refusing the account for the rest of the process — recoverable only
+        // by a relaunch or a second successful sign-in, even though the
+        // first one had already worked.
+        deadGrants.remove(profile.uuid)
         try await persist(credentials, accountUUID: profile.uuid, service: Self.pendingService)
         try await persist(credentials, accountUUID: profile.uuid, service: Self.service)
-        // A fresh sign-in proves the account was previously dead only if it
-        // was marked so; clear that now so `credentials`/`hasGrant` stop
-        // refusing it.
-        deadGrants.remove(profile.uuid)
         return profile
     }
 
@@ -120,10 +151,44 @@ actor PulseOAuthStore {
     /// no grant for this account, or when a rotation attempt already proved
     /// this run that the grant is dead (B1) — either way the caller falls
     /// back to the harness stores, exactly as before this store existed.
+    ///
+    /// **R2-B1.** A pair `read()` picked from `-pending` because it was
+    /// FRESHER than primary (by `expiresAt`) is not the same thing as a pair
+    /// proven to work — `rotate()` writes pending before it ever calls
+    /// `verifies()`, and a rotation that failed verification leaves exactly
+    /// that: a fresh, unverified pair sitting in `-pending`, forever, until
+    /// something re-checks it. Left unhandled, the FIRST version of this fix
+    /// only protected the ONE tick that ran the failed rotation: the very
+    /// next call would find pending's ~8h `expiresAt` beats primary's
+    /// (already inside its 300s window), `needsRefresh()` on that fresh-
+    /// looking pair would be false, `rotateCoalesced` would never run, and
+    /// the unverified pair would be served — and pinned ahead of every
+    /// working harness token by `ClaudeProvider` — for its ENTIRE ~8h
+    /// lifetime. So an unpromoted pending pair is verified once, right here,
+    /// before it is ever handed out; success promotes it into primary (so
+    /// every later call skips this cost); failure refuses it outright — NOT
+    /// a fall-back to primary's near-expiry pair, which the crash/failure
+    /// that left pending unpromoted already proved was about to need
+    /// rotating anyway.
     func credentials(forAccountUUID accountUUID: String) async -> Credentials? {
         guard !deadGrants.contains(accountUUID) else { return nil }
-        guard var current = await read(accountUUID: accountUUID) else { return nil }
-        if current.needsRefresh() {
+        guard let picked = await read(accountUUID: accountUUID) else { return nil }
+        var current = picked.credentials
+
+        if picked.isUnpromotedPending {
+            guard await verifies(current) else { return nil }
+            // Best-effort: even if this particular write fails, the pair is
+            // still correctly served this once (it just verified), and the
+            // NEXT call re-verifies and tries to promote again — the same
+            // "retry, never lose the durable pending copy" shape `rotate`
+            // itself uses.
+            try? await persist(current, accountUUID: accountUUID, service: Self.service)
+        } else if current.needsRefresh(), (consecutiveRefreshFailures[accountUUID] ?? 0) < Self.maxConsecutiveRefreshFailures {
+            // R2-S1: once this run has failed to refresh this account
+            // `maxConsecutiveRefreshFailures` times in a row for a reason
+            // that isn't `invalid_grant` (a wrong `client_id`, a persistent
+            // 5xx, ...), stop trying every tick — see
+            // `consecutiveRefreshFailures`'s doc comment.
             if let rotated = await rotateCoalesced(accountUUID: accountUUID, current: current) {
                 current = rotated
             }
@@ -185,6 +250,17 @@ actor PulseOAuthStore {
     /// exactly the window `-pending` exists to cover. See
     /// `docs/adr/0001-refresh-token-rotation-write-order.md`.
     private func rotate(accountUUID: String, current: Credentials) async throws -> Credentials {
+        // R2-S3: refuses to spend the SAME refresh token twice this run,
+        // closing the one gap coalescing (`inFlightRotations`) cannot: a
+        // caller that read `current` before a winner started, but only
+        // reaches this call after the winner's in-flight entry was already
+        // cleared, is sequential rather than concurrent — invisible to
+        // `rotateCoalesced`. Fingerprinted BEFORE the network call, so this
+        // check fires even if the call itself never runs.
+        guard spentRefreshFingerprints.insert(PiAccountResolver.fingerprint(current.refreshToken)).inserted else {
+            throw ProviderFetchError.dataUnavailable(description: "refresh token already spent this run")
+        }
+
         let tokens: ClaudeOAuthClient.TokenPair
         do {
             if let refreshOverride {
@@ -213,9 +289,19 @@ actor PulseOAuthStore {
             if Self.isDeadGrantError(error) {
                 deadGrants.insert(accountUUID)
                 await clearGrant(accountUUID: accountUUID)
+            } else {
+                // R2-S1: every OTHER refresh failure is transient in the
+                // sense that it isn't proven-dead, but "transient" does not
+                // mean "safe to retry forever with no backoff" — see
+                // `consecutiveRefreshFailures`'s doc comment.
+                consecutiveRefreshFailures[accountUUID, default: 0] += 1
             }
             throw error
         }
+        // The refresh call itself succeeded, so whatever streak of failures
+        // this account had is over — regardless of what verification below
+        // decides.
+        consecutiveRefreshFailures[accountUUID] = 0
         let rotated = Credentials(
             accessToken: tokens.accessToken,
             refreshToken: tokens.refreshToken,
@@ -225,18 +311,18 @@ actor PulseOAuthStore {
         try await persist(rotated, accountUUID: accountUUID, service: Self.pendingService)
 
         guard await verifies(rotated) else {
-            // B2: the rotated pair is durable in `-pending` — nothing is lost
-            // — but it must NOT be handed to this call's caller. An unverified
-            // pair that `ClaudeProvider` then pins ahead of a working harness
-            // token would show the user a reason produced by a credential
-            // this code already knows is bad. THROWING (not returning
-            // `rotated`) is what makes `credentials(forAccountUUID:)` keep
-            // `current` — the old pair, still valid until its own natural
-            // expiry — exactly as
-            // `docs/adr/0001-refresh-token-rotation-write-order.md` describes.
-            // The next `needsRefresh()` tick reads `-pending` first (see
-            // `read()`) and retries verification without re-spending the
-            // (already-spent) refresh token.
+            // B2 / R2-B1: the rotated pair is durable in `-pending` — nothing
+            // is lost — but it must NOT be handed to THIS call's caller.
+            // THROWING (not returning `rotated`) is what makes
+            // `credentials(forAccountUUID:)` keep `current` — the old pair,
+            // still valid until its own natural expiry — for this one call.
+            // The pair sitting in `-pending` stays UNVERIFIED, not retried
+            // automatically: `read()` will pick it again on the very next
+            // call (its `expiresAt` beats primary's), and
+            // `credentials(forAccountUUID:)`'s `isUnpromotedPending` branch is
+            // what actually re-verifies it before serving it — not a
+            // `needsRefresh()` tick, which would not fire again for ~8h. See
+            // that branch's doc comment.
             throw ProviderFetchError.dataUnavailable(description: "rotated pair failed verification")
         }
         try await persist(rotated, accountUUID: accountUUID, service: Self.service)
@@ -288,16 +374,27 @@ actor PulseOAuthStore {
     /// (a real hole in the old "always prefer pending" rule). Comparing
     /// `expiresAt` is correct in both call sites instead of correct in one
     /// and silently wrong in the other.
-    private func read(accountUUID: String) async -> Credentials? {
+    ///
+    /// `isUnpromotedPending` (R2-B1) tells the caller whether the chosen pair
+    /// came from `-pending` while DIFFERING from primary — i.e. a pair that
+    /// was written by a rotation but never proven, by verification, to
+    /// actually work. `true` only when pending is the pick AND its content
+    /// differs from primary; a pending that already matches primary was
+    /// already verified and promoted by a previous call, so re-verifying it
+    /// again would be a wasted `/oauth/usage` call every time it is read.
+    private func read(accountUUID: String) async -> (credentials: Credentials, isUnpromotedPending: Bool)? {
         let pending = try? await load(service: Self.pendingService, accountUUID: accountUUID)
         let primary = try? await load(service: Self.service, accountUUID: accountUUID)
         switch (pending, primary) {
         case (let pending?, let primary?):
-            return pending.expiresAt >= primary.expiresAt ? pending : primary
+            if pending.expiresAt >= primary.expiresAt {
+                return (pending, pending.accessToken != primary.accessToken)
+            }
+            return (primary, false)
         case (let pending?, nil):
-            return pending
+            return (pending, true)
         case (nil, let primary?):
-            return primary
+            return (primary, false)
         case (nil, nil):
             return nil
         }

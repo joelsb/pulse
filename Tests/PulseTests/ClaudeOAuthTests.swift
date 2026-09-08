@@ -97,6 +97,50 @@ struct ClaudeOAuthAcceptCallbackTests {
     }
 }
 
+@Suite("ClaudeOAuthClient token-endpoint error classification")
+struct ClaudeOAuthTokenEndpointErrorTests {
+    // R2-B2 (review round 2): this is the ONE function deciding whether a
+    // `400` deletes both of an account's Keychain items
+    // (`PulseOAuthStore.isDeadGrantError` keys directly on its result), and
+    // review round 2 found NOTHING exercised it directly — the shell harness
+    // only threw already-classified values from `refreshOverride`. The five
+    // cases below are the ones the review specified.
+    @Test func exactInvalidGrantBodyClassifies() {
+        let body = Data(#"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#.utf8)
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 400, body: body) == .invalidGrant)
+    }
+
+    @Test func differentErrorFieldIsNeverInvalidGrant() {
+        let body = Data(#"{"error":"invalid_request"}"#.utf8)
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 400, body: body) == .other(status: 400))
+    }
+
+    @Test func nonJSONBodyIsOther() {
+        let body = Data("<html>cloudflare</html>".utf8)
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 400, body: body) == .other(status: 400))
+    }
+
+    @Test func emptyBodyIsOther() {
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 400, body: Data()) == .other(status: 400))
+    }
+
+    @Test func invalidGrantAtANonFourHundredStatusIsNeverInvalidGrant() {
+        // The RFC 6749 §5.2 shape is specifically a 400; the same body at a
+        // different status is not the signal this classifies.
+        let body = Data(#"{"error":"invalid_grant"}"#.utf8)
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 500, body: body) == .other(status: 500))
+    }
+
+    // R2-S2: the comparison is normalised (trimmed, lowercased) because
+    // matching TOO STRICTLY reopens B1 in full (a gateway-added trailing
+    // space or a differently-cased variant would retry forever with no
+    // backoff instead of ever being recognised as permanent).
+    @Test func whitespaceAndCaseVariantsStillClassify() {
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 400, body: Data(#"{"error":"invalid_grant "}"#.utf8)) == .invalidGrant)
+        #expect(ClaudeOAuthClient.tokenEndpointError(status: 400, body: Data(#"{"error":"Invalid_Grant"}"#.utf8)) == .invalidGrant)
+    }
+}
+
 @Suite("ClaudeOAuthClient token response")
 struct ClaudeOAuthTokenResponseTests {
     @Test func parsesAccessRefreshExpiryAndScope() throws {

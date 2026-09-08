@@ -243,20 +243,54 @@ struct ClaudeOAuthClient: Sendable {
         // (via `HTTPClient.send`) collapses every 400 alike before the body
         // is ever looked at, which is the exact mistake `TokenEndpointError`
         // exists to undo. See that type's doc comment.
-        let (status, responseData) = try await http.postRaw(Self.tokenEndpoint, headers: headers, jsonBody: data)
+        let (status, responseData, response) = try await http.postRaw(Self.tokenEndpoint, headers: headers, jsonBody: data)
         guard (200...299).contains(status) else {
+            // 429 specifically maps back to the shared `ProviderFetchError`
+            // (review round 2 nit 2): `postRaw` no longer builds it the way
+            // `send` did, and losing `Retry-After` here would make a sign-in
+            // rate limit render as a bare "Sign-in failed (429)" instead of
+            // the absolute retry time `ProviderFetchError.rateLimited`
+            // already knows how to say. Every OTHER status still goes through
+            // `tokenEndpointError`.
+            if status == 429 {
+                throw ProviderFetchError.rateLimited(retryAfter: HTTPClient.retryAfter(from: response))
+            }
             throw Self.tokenEndpointError(status: status, body: responseData)
         }
         return try Self.parseTokenResponse(responseData)
     }
 
-    /// Pure (tested): classifies a non-2xx token-endpoint response. Reads
-    /// ONLY the `error` field of the body — `error_description` and anything
-    /// else present is never retained.
+    /// Pure, tested by `ClaudeOAuthTokenEndpointErrorTests`
+    /// (`Tests/PulseTests/ClaudeOAuthTests.swift`) and by
+    /// `scripts/oauth-rotation-harness.swift` scenario 7 (`swift test` cannot
+    /// run on this machine, so the same five cases run there against the
+    /// real static function). This is the ONE function deciding whether a
+    /// `400` deletes both of an account's Keychain items — review round 2
+    /// (2026-09-08) found it had NO test anywhere: the shell harness only
+    /// throws ALREADY-classified `TokenEndpointError` values from
+    /// `refreshOverride`, so a defect planted directly in this function (drop
+    /// the `status == 400` guard; loosen `== "invalid_grant"` to `!= nil`,
+    /// which is round 2's original bug restored) passed all 7 scenarios with
+    /// the classifier itself never exercised.
+    ///
+    /// Reads ONLY the `error` field of the body — `error_description` and
+    /// anything else present is never retained. The comparison is
+    /// normalised (trimmed, lowercased) because the failure mode of matching
+    /// TOO STRICTLY is B1 in full: a byte-for-byte miss (a gateway adding
+    /// trailing whitespace, a differently-cased variant) reads as `.other`,
+    /// which retries forever with no backoff (see
+    /// `PulseOAuthStore.consecutiveRefreshFailures`). Deliberately NOT
+    /// widened to match on `error_description` or a nested `error` object:
+    /// `error_description` is free text that could contain the phrase while
+    /// describing something else, and that direction of a mistake DELETES a
+    /// live grant rather than merely retrying — the two failure modes are not
+    /// symmetric, so only the narrow, spec-shaped (`error`, RFC 6749 §5.2)
+    /// field is read.
     static func tokenEndpointError(status: Int, body: Data) -> TokenEndpointError {
         guard status == 400,
               let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              (root["error"] as? String) == "invalid_grant"
+              let errorField = root["error"] as? String,
+              errorField.trimmingCharacters(in: .whitespaces).lowercased() == "invalid_grant"
         else {
             return .other(status: status)
         }

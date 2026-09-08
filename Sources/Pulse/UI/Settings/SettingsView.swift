@@ -386,7 +386,7 @@ private struct ClaudeSignInButton: View {
         if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
         if let tokenEndpointError = error as? ClaudeOAuthClient.TokenEndpointError {
             switch tokenEndpointError {
-            case .invalidGrant: return "Sign-in was rejected—try again"
+            case .invalidGrant: return "Sign-in was rejected - try again"
             case .other(let status): return "Sign-in failed (\(status))"
             }
         }

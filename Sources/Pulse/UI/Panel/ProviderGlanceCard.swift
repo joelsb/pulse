@@ -107,6 +107,14 @@ struct ProviderGlanceCard: View {
     /// alone.
     private func staleCaption(for snapshot: UsageSnapshot) -> some View {
         let capturedAt = snapshot.limitsCapturedAt ?? record.lastSuccess
+        // The `?? "Limits unavailable"` here is unreachable by construction,
+        // not a real fallback (review round 2 nit 3): this function is only
+        // ever called under `record.isStale`, which is defined as
+        // `snapshot != nil && lastError != nil` — so `lastError` is always
+        // present at this call site. Left as a plain `??` rather than a
+        // force-unwrap: the defensive form costs nothing and survives a
+        // future caller that forgets the `isStale` guard, where a `!` would
+        // crash instead.
         let reason = record.lastError?.userMessage ?? "Limits unavailable"
         let text = capturedAt.map { captured in
             "\(Formatters.duration(Date.now.timeIntervalSince(captured))) old - \(reason)"
