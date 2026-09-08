@@ -87,12 +87,43 @@ final class UsageStore {
             if incoming.secondary == nil { incoming.secondary = previous.secondary }
             if incoming.tertiary == nil { incoming.tertiary = previous.tertiary }
             if incoming.extraWindows.isEmpty { incoming.extraWindows = previous.extraWindows }
+            // The gauges on screen are from the last successful capture, not
+            // this failed attempt — carry that timestamp forward so the age
+            // caption stays honest instead of resetting to "just now".
+            incoming.limitsCapturedAt = previous.limitsCapturedAt
         }
 
         record.snapshot = incoming
-        record.lastError = nil
+        // A carried-forward failure must stay visible on the record: clearing
+        // this unconditionally (as before) made `isStale` —
+        // `snapshot != nil && lastError != nil` — unreachable on this path,
+        // so a failed limits fetch rendered exactly like a fresh success.
+        record.lastError = incoming.limitsError
         record.notConnectedHint = nil
-        record.lastSuccess = incoming.fetchedAt
+        // Only a real limits success moves the freshness clock. Bumping it on
+        // a carried-forward FAILURE was the other half of the honesty bug:
+        // the footer stamped "Updated just now" over numbers that were, in
+        // fact, hours old.
+        //
+        // Keyed on `limitsError == nil`, not `!limitsUnavailable` — the two
+        // are NOT the same thing. Cursor sets `limitsUnavailable` for an
+        // account that simply has no plan gauge to report (a permanent,
+        // successful property of that plan, `CursorProvider.swift`) and
+        // Codex can set it with `limitsError == nil` when the usage call
+        // succeeded but produced no primary window
+        // (`CodexProvider.swift`). Neither carries `lastError` (see above),
+        // so `isStale` stays false and the card renders normally — but
+        // keying this on `limitsUnavailable` alone froze `lastSuccess` at nil
+        // forever for both, which froze `PanelFooter`'s "Updated Xm ago" at
+        // "Waiting for first update…" permanently AND defeated
+        // `RefreshScheduler.refreshAll(ifOlderThan:)` (`lastSuccess ??
+        // .distantPast` never ages), so opening the panel re-ran every fetch
+        // every time. Claude always sets `limitsUnavailable` and
+        // `limitsError` together (`ClaudeProvider.swift`), so this changes
+        // nothing for the case this file's `apply` fix is about.
+        if incoming.limitsError == nil {
+            record.lastSuccess = incoming.fetchedAt
+        }
         record.hasLoadedOnce = true
         record.isRefreshing = false
         record.notConnectedStrikes = 0

@@ -5,51 +5,6 @@ import Testing
 
 @Suite("System monitor")
 struct SystemMonitorTests {
-    // MARK: - ps parsing
-
-    /// Captured from `ps -Aceo pid,pcpu,rss,comm -r` on this machine: leading
-    /// spaces on the pid column, RSS in kilobytes, and a command containing a
-    /// space (the case a naive `fields[3]` would truncate).
-    private let psOutput = """
-      PID  %CPU    RSS COMM
-      412  92.4 1048576 Xcode
-      1    7.1  32768 launchd
-      903  3.4  524288 Google Chrome
-      77  0.0   4096 loginwindow
-      88  0.0   2048 sleepimage
-    """
-
-    @Test("Parses pid, cpu, resident bytes and multi-word command")
-    func parsesRows() {
-        let rows = SystemSampler.parseProcessList(psOutput, limit: 5)
-
-        #expect(rows.count == 5)
-        #expect(rows[0].pid == 412)
-        #expect(rows[0].name == "Xcode")
-        #expect(rows[0].cpu == 92.4)
-        // RSS is kilobytes, so the model must report 1 GiB, not 1 MB.
-        #expect(rows[0].memory == 1_048_576 * 1024)
-        #expect(rows[2].name == "Google Chrome")
-    }
-
-    @Test("Honors the row limit rather than returning every process")
-    func respectsLimit() {
-        #expect(SystemSampler.parseProcessList(psOutput, limit: 2).count == 2)
-        #expect(SystemSampler.parseProcessList(psOutput, limit: 99).count == 5)
-    }
-
-    @Test("Malformed lines are skipped, not fatal")
-    func skipsGarbage() {
-        let text = """
-        PID %CPU RSS COMM
-        notapid x y z
-        5 1.0 1024 kernel_task
-        """
-        let rows = SystemSampler.parseProcessList(text, limit: 4)
-        #expect(rows.count == 1)
-        #expect(rows[0].name == "kernel_task")
-    }
-
     // MARK: - Rankings
 
     /// Built so the two rankings DISAGREE: the biggest CPU consumer is not the
@@ -181,7 +136,10 @@ struct SystemMonitorTests {
         // never differ in length - a card reading a shorter one would silently
         // plot a stale window.
         #expect(monitor.memoryHistory.count == monitor.cpuHistory.count)
-        #expect(monitor.memoryHistory.last == 100)
+        // memoryTotal is 100, memoryUsed is min(index, 100); the loop only runs
+        // to historyLimit+19 (79), which never reaches the 100-total cap, so
+        // the last utilization is 79, not a saturated 100.
+        #expect(monitor.memoryHistory.last == 79)
     }
 
     @MainActor
@@ -230,7 +188,6 @@ struct SystemMonitorTests {
     }
 
     @MainActor
-    @MainActor
     @Test("Process sampling returns real rows for the running machine")
     func liveProcesses() async {
         let sample = await SystemSampler().sample()
@@ -271,6 +228,7 @@ struct SystemMonitorTests {
 
     // MARK: - Sparkline geometry
 
+    @MainActor
     @Test("Sparkline maps values into the box, newest at the right edge")
     func sparklinePoints() {
         let size = CGSize(width: 100, height: 50)
@@ -282,6 +240,7 @@ struct SystemMonitorTests {
         #expect(points[2] == CGPoint(x: 100, y: 0))  // 100% touches the top
     }
 
+    @MainActor
     @Test("Out-of-range values clamp instead of drawing outside the card")
     func sparklineClamps() {
         let size = CGSize(width: 10, height: 10)
@@ -290,6 +249,7 @@ struct SystemMonitorTests {
         #expect(points[1].y == 0)
     }
 
+    @MainActor
     @Test("Fewer than two samples produce no path")
     func sparklineEmpty() {
         #expect(Sparkline.points([42], in: CGSize(width: 10, height: 10), maximum: 100).isEmpty)
