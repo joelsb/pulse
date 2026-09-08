@@ -345,7 +345,7 @@ struct CodexBreakdownTests {
         )
     }
 
-    @Test func rollupGroupsByCwdAndHasNoCost() {
+    @Test func rollupGroupsByCwdAndComputesCost() {
         let a1 = aggregate(cwd: "/Users/test/alpha", id: "a1", dayKey: "2026-06-18", input: 1000, lastActivity: now)
         let a2 = aggregate(cwd: "/Users/test/alpha", id: "a2", dayKey: "2026-06-17", input: 500, lastActivity: now)
         let b1 = aggregate(cwd: "/Users/test/beta", id: "b1", dayKey: "2026-06-18", input: 100, lastActivity: now)
@@ -355,7 +355,9 @@ struct CodexBreakdownTests {
         let alpha = projects[0]
         #expect(alpha.sessionCount == 2)
         #expect(alpha.totals.input == 1500)
-        #expect(alpha.totals.costUSD == nil) // plan-included, never a cost
+        // gpt-5-codex: $1.25 / MTok input, no output/cache tokens in this fixture:
+        // 1500 / 1_000_000 * 1.25 = 0.001875.
+        #expect(abs((alpha.totals.costUSD ?? 0) - 0.001875) < 0.0000001)
     }
 
     @Test func rollupFiltersByDayKey() {

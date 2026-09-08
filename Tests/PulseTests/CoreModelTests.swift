@@ -97,7 +97,7 @@ struct PricingTests {
     }
 
     @Test func unknownModelIsNil() {
-        #expect(PricingTable.pricing(forClaudeModel: "gpt-5.5") == nil)
+        #expect(PricingTable.pricing(forClaudeModel: "not-a-model-xyzzy") == nil)
     }
 }
 
