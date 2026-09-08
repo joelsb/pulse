@@ -434,7 +434,21 @@ actor PulseOAuthStore {
     }
 
     private func load(service: String, accountUUID: String) async throws -> Credentials {
-        let secret = try await keychain.readGenericPassword(service: service, account: accountUUID)
+        let stored = try await keychain.readGenericPassword(service: service, account: accountUUID)
+        // `KeychainWriter.decode`, not `Self.decode`, is the FIRST step —
+        // everything this store writes goes through `KeychainWriter.write`,
+        // which base64-encodes before it ever reaches `security` (see that
+        // type's doc comment: no length cap, immune to the `-i` parser's
+        // whitespace-splitting). A value that fails to base64-decode is a
+        // legacy item from before this fix, or a truncated/corrupted one —
+        // either way it is treated exactly like "item not found", never a
+        // crash: `read()` already wraps this whole call in `try?`, so this
+        // throw becomes nil there, same as `KeychainReader.Failure.itemNotFound`
+        // would. The next successful write (`-U`) overwrites it cleanly, no
+        // separate delete step needed (verified live).
+        guard let secret = KeychainWriter.decode(stored) else {
+            throw ProviderFetchError.parsing(description: "PulseOAuthStore: stored item could not be decoded")
+        }
         return try Self.decode(secret)
     }
 

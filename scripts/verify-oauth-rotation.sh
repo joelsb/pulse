@@ -55,6 +55,21 @@
 # retries), fixed in the same commit; see `PulseOAuthStore.rotate`'s comment
 # on `spentRefreshFingerprints.insert`.
 #
+# Round 5 (2026-09-08): the OAuth round trip now SUCCEEDS (round 4's fix
+# held), but sign-in still failed - this time at the Keychain write.
+# `security add-generic-password -w` (no trailing value, two-copy stdin
+# prompt) - the write path EVERY scenario above used since scenario 1 -
+# silently caps the stored value at exactly 128 bytes, exit 0 regardless.
+# Every prior scenario used short fake tokens ("NEW-AT-1") that never came
+# near the cap, so all 11 passed while the real ~350-byte JSON payload (or a
+# 1,698-byte Codex access token) truncated silently. Fixed by moving the
+# write to `security -i` (interactive mode, no length cap) with the payload
+# base64-encoded (that mode's own parser word-splits on whitespace
+# otherwise, and every real scope string contains a space). Scenario 12 uses
+# a realistic-length payload (1,698-byte access token, the real production
+# scope string) through the real write/read/decode path; the
+# `no-base64-encoding-on-write` defect guards the encoding step itself.
+#
 # This runs against the REAL Keychain, using scratch account names
 # (`harness-scratch-...`) that are never read by production code and are
 # deleted at the end of every run, pass or fail.
@@ -219,6 +234,17 @@ run_case() {
 '            "code": code,
             "client_id": clientID,'
       ;;
+    no-base64-encoding-on-write)
+      # Round 5 regression: sends the raw secret straight into `security -i`'s
+      # command line instead of base64-encoding it first. Breaks two ways at
+      # once, both measured live: `-i`'s own parser word-splits on
+      # whitespace, so any payload with a space (every real scope string has
+      # one) truncates at the first one; and this is also the shape of "someone
+      # simplifies away the encoding layer thinking it's unneeded overhead".
+      swap "$dir/KeychainWriter.swift" \
+        'let command = "add-generic-password -U -a \(account) -s \(service) -w \(Self.encode(secret))\n"' \
+        'let command = "add-generic-password -U -a \(account) -s \(service) -w \(secret)\n"'
+      ;;
     return-unverified-pair)
       # B2 regression: hands the caller a pair that failed verification,
       # instead of keeping it durable in -pending and throwing so the caller
@@ -309,6 +335,7 @@ run_case "B1 too broad: any 400 marked dead, not just invalid_grant" dead-grant-
 run_case "R2-B1 regressed: unpromoted pending served without verifying" serve-unpromoted-pending-unverified || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "R2-B2 regressed: invalid_grant match loosened to any error"   invalid-grant-match-too-loose      || UNCAUGHT=$((UNCAUGHT + 1))
 run_case "round 4 regressed: state missing from the exchange body"      missing-state-in-exchange          || UNCAUGHT=$((UNCAUGHT + 1))
+run_case "round 5 regressed: raw (unencoded) secret sent to security -i" no-base64-encoding-on-write        || UNCAUGHT=$((UNCAUGHT + 1))
 
 echo
 if [ "$UNCAUGHT" -ne 0 ]; then

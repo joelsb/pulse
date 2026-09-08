@@ -73,6 +73,58 @@ any instruction boundary; a force-quit can land the process between any two
 statements). The fix has to be about *what exists on disk after any possible
 crash point*, not about making the window smaller.
 
+## Wire format: base64, because `security` itself has two undocumented limits
+
+Everything above assumes the write actually lands with the value it was
+given. Round 5 (2026-09-08, a real human's first live sign-in) found that was
+false for the write path this whole design used from the start: `security
+add-generic-password -w` with no trailing value — the two-copy stdin PROMPT
+mode, chosen originally because it keeps the secret out of `ps -ef` — has a
+second, independent failure mode beyond the mismatch-detection one "Why a 200
+proves nothing" and this file's Keychain-write comments already cover:
+
+```
+sent 100 -> stored 100     sent 128 -> stored 128
+sent 127 -> stored 127     sent 129 -> stored 128     sent 200 -> stored 128     sent 300 -> stored 128
+```
+
+**It silently truncates at exactly 128 bytes, exit 0 at every length.** The
+real payload here is a ~350-byte JSON blob; the Codex access token alone (the
+next account type this store is meant to extend to) is 1,698 bytes — no
+per-field variant of the two-copy scheme survives either length. This shipped
+once already because the writer's OWN scratch verification test used an
+18-character value, which is nowhere near 128 bytes and proved nothing about
+the cap.
+
+The fix is `security -i` (interactive mode, reads its command from stdin
+instead of a prompt): measured with no length cap up to 1,800 bytes tried (not
+a ceiling that was hit, just as far as tested). But `-i`'s own command parser
+word-splits on whitespace, so the raw JSON payload — which always contains at
+least one space, e.g. `"scope":"user:profile user:inference"` — truncates at
+the first one instead:
+
+```
+sent 134 -> stored 117   (truncated exactly at the first space in "user:profile user:inference")
+```
+
+**Base64-encoding the payload before it ever reaches `security` closes both
+gaps at once**: the base64 alphabet contains no whitespace (closing the `-i`
+parser split) and has no practical length ceiling (closing the 128-byte cap).
+Measured round-tripping exactly at every length and every byte value tried,
+including payloads containing `+`, `/` and `=`. `KeychainWriter.encode`/
+`decode` are the single source of truth for this wire format; every reader of
+a Pulse-owned Keychain item (`PulseOAuthStore.load`, and this file's own
+verifier) decodes through them, never around them, so an encoding drift
+cannot pass silently in one path while being caught in another.
+
+This is exactly the class of thing a future "simplification" deletes,
+because an 18-character scratch test or a short fake token in a test fixture
+(this repo had both) makes the cap and the split invisible. `scripts/verify-oauth-rotation.sh`
+scenario 12 exists specifically to keep a REALISTIC-length payload (1,698
+bytes, the real production scope string with real spaces) in the regression
+suite permanently, and the `no-base64-encoding-on-write` defect requires
+removing the encoding step to be caught.
+
 ## Why a 200 on the refresh call proves nothing
 
 This project's other proven rule (`ClaudeOAuthClient.scope`) is that
@@ -326,3 +378,12 @@ rules out two concurrent successes racing for the same account.
   defects earns its cost by also catching regressions its own author
   introduces while adding the NEXT scenario, not just the ones a reviewer
   named.
+- Round 5 (2026-09-08): the round-4 fix held — the OAuth round trip succeeded
+  — but sign-in then failed at the Keychain write. Measured, see "Wire
+  format" above: the 128-byte silent truncation cap and the `-i` parser's
+  whitespace split, both with exact byte counts. Scenario 12 uses a
+  realistic-length payload (1,698-byte access token, the real 5-scope
+  production string) through the real write/read/decode path, permanently
+  — every prior scenario's short fake tokens (`"NEW-AT-1"`, 6 bytes) never
+  came near either limit. The `no-base64-encoding-on-write` defect guards
+  the encoding step itself.

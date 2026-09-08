@@ -83,7 +83,16 @@ func seedItem(service: String, account: String, tokens: ClaudeOAuthClient.TokenP
 
 func readItem(service: String, account: String) async -> PulseOAuthStore.Credentials? {
     let reader = KeychainReader()
-    guard let secret = try? await reader.readGenericPassword(service: service, account: account) else { return nil }
+    guard let stored = try? await reader.readGenericPassword(service: service, account: account) else { return nil }
+    // Round 5: `KeychainWriter.decode` FIRST, un-base64ing the wire format
+    // `KeychainWriter.write` applies, THEN `PulseOAuthStore.decode` to parse
+    // the JSON underneath — this helper is a second, independent reader of
+    // the same items `PulseOAuthStore.load` reads, and it needs the same two
+    // steps in the same order. Missing this on the first pass of the round-5
+    // fix made every single scenario fail with a false "got nil", including
+    // ones that had nothing to do with the length bug — caught by actually
+    // running the harness after the fix, not by inspection.
+    guard let secret = KeychainWriter.decode(stored) else { return nil }
     return try? PulseOAuthStore.decode(secret)
 }
 
@@ -471,6 +480,51 @@ func runConcurrentRotationScenario() async {
     checkEqual(primaryAfter?.accessToken, "ROTATED-AT-11", "scenario 11: the account must end up on the single rotated pair, never split, burned or deleted")
 }
 
+// ------------------------------------------------------------ Scenario 12 (round 5)
+// A realistic-length payload must round-trip exactly. The write path this
+// harness has used since scenario 1 was `security add-generic-password -w`
+// with no trailing value (two-copy stdin prompt) - measured (round 5) to
+// silently cap the stored value at exactly 128 bytes, exit 0 at every
+// length. Every scenario above this one used short fake tokens
+// ("NEW-AT-1", 6 characters) that never came near the cap, so all 11 passed
+// while a real sign-in's Keychain write (a ~350-byte JSON blob, or a
+// 1,698-byte Codex access token) silently truncated and then failed to
+// parse back. Fixed by moving the write itself to `security -i`
+// (interactive mode, no length cap) with the payload base64-encoded (that
+// mode's own command parser word-splits on whitespace otherwise, and a real
+// scope string like the one below always contains at least one space).
+// This scenario uses the actual production scope string, spaces and all,
+// and an access token as long as Codex's real one.
+
+func runRealisticLengthPayloadScenario() async {
+    let account = scratchAccount("realistic-length")
+    let longAccessToken = String(repeating: "T", count: 1698) // Codex's real length
+    let longRefreshToken = String(repeating: "R", count: 400)
+    let realisticScope = "user:file_upload user:inference user:mcp_servers user:profile user:sessions:claude_code"
+    let realistic = ClaudeOAuthClient.TokenPair(
+        accessToken: longAccessToken, refreshToken: longRefreshToken,
+        expiresAt: Date.now.addingTimeInterval(28800), grantedScope: realisticScope
+    )
+
+    do {
+        try await seed(account: account, tokens: realistic)
+    } catch {
+        failures.append("scenario 12: seeding a realistic-length payload failed: \(error)")
+        return
+    }
+
+    let readBack = await readItem(service: "de.byte.pulse.oauth", account: account)
+    checkEqual(readBack?.accessToken, longAccessToken, "scenario 12: a realistic-length (1,698-byte) access token must round-trip exactly, not truncate")
+    checkEqual(readBack?.refreshToken, longRefreshToken, "scenario 12: the refresh token must round-trip exactly too")
+    checkEqual(readBack?.grantedScope, realisticScope, "scenario 12: a scope value containing spaces must round-trip exactly")
+
+    // A real store read must also decode it correctly end to end, not just
+    // the raw Keychain item.
+    let store = PulseOAuthStore(verifyOverride: { _ in true })
+    let credentials = await store.credentials(forAccountUUID: account)
+    checkEqual(credentials?.accessToken, longAccessToken, "scenario 12: PulseOAuthStore.credentials must return the full-length token, not a truncated or undecodable one")
+}
+
 /// A locked counter, since the refresh override runs off-actor and Swift 6
 /// won't let a plain closure mutate a captured `var` across that boundary.
 final class CountBox: @unchecked Sendable {
@@ -502,6 +556,7 @@ Task {
     runExchangeRequestBodyScenario()
     await runBoundedRefreshFailuresScenario()
     await runConcurrentRotationScenario()
+    await runRealisticLengthPayloadScenario()
     semaphore.signal()
 }
 while semaphore.wait(timeout: .now()) == .timedOut {

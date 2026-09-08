@@ -11,29 +11,80 @@ import Foundation
 /// world-readable via `ps -ef`, which is exactly the kind of leak the token
 /// rules in this repo exist to prevent.
 ///
-/// **`-w` with no trailing value prompts for the password on stdin, twice** —
-/// add, then confirm, the same shape as `passwd`.
+/// **`-w` with no trailing value prompts for the password on stdin, twice,
+/// AND silently truncates at 128 bytes.** Both measured 2026-09-08, on the
+/// (now former) two-copy stdin-prompt write path:
 ///
-/// **The exit status cannot tell you whether it worked.** Measured
-/// 2026-09-08: `security add-generic-password -U -w` exits **0** whether the
-/// two stdin copies matched or not. On a mismatch it prints "Passwords do not
-/// match" straight to the controlling tty — invisible to a piped `Process`,
-/// which has none — and silently creates the item with an **empty**
-/// password (`security find-generic-password -w` then returns `""`, also
-/// exit 0). A caller trusting the termination status alone would read a
-/// corrupted write as a success. The only reliable check is a **read-back**:
-/// write, then read the same service/account and compare to what was sent.
-/// This is exactly the Keychain equivalent of the pending→verify→promote
-/// pattern the OAuth rotation ADR uses for the network side of the same
-/// problem — trust nothing that answered 200/0 until it also answers what
-/// you asked it.
+/// 1. A mismatch between the two copies exits **0** either way, prints
+///    "Passwords do not match" straight to the controlling tty (invisible to
+///    a piped `Process`, which has none), and silently creates the item with
+///    an **empty** password.
+/// 2. Independently, and worse: the value itself is capped at exactly
+///    **128 bytes**, silently, exit 0 on every length. Measured directly:
+///    `sent 127 -> stored 127`, `sent 128 -> stored 128`, `sent 129 -> stored
+///    128`, `sent 200 -> stored 128`, `sent 300 -> stored 128`. Pulse's real
+///    OAuth payload is a ~350-byte JSON blob; Codex's access token alone is
+///    1,698 bytes. Both round-tripped correctly through a hand-written
+///    scratch test using an 18-character value, which is exactly why this
+///    shipped once already — the first version's OWN verification (below)
+///    only ever proved a short value works.
+///
+/// **The fix: `security -i` (interactive mode), base64-encoded.**
+/// `-i` reads commands from stdin instead of argv, so the secret still never
+/// appears in `ps -ef`, and it has NO length cap — measured up to 1,800 bytes
+/// (the ceiling of what was tried, not a ceiling that was hit). Passed as an
+/// inline `-w <value>` token on the command line (not omitted — no
+/// double-copy prompt exists in this mode at all), so problem 1 above cannot
+/// recur either. One remaining catch, also measured: `-i`'s own command
+/// parser word-splits on whitespace, so a raw JSON payload (which always
+/// contains at least one space, e.g. `"scope":"user:profile
+/// user:inference"`) truncates at the first one (`sent 134 -> stored 117` on
+/// the exact payload shape this file writes). **Base64-encoding the payload
+/// before it ever reaches `security` solves this too** — the base64 alphabet
+/// has no whitespace, and it round-trips exactly at every length tried,
+/// including with `+`, `/` and `=` all present.
+///
+/// **The exit status STILL cannot tell you whether it worked** — nothing
+/// about `-i` changes that. The read-back is unconditional and now compares
+/// the DECODED value, so an encoding bug (forgetting to encode, or to
+/// decode) cannot pass either: this is exactly the Keychain equivalent of
+/// the pending→verify→promote pattern the OAuth rotation ADR uses for the
+/// network side of the same problem — trust nothing that answered 200/0
+/// until it also answers what you asked it.
 struct KeychainWriter: Sendable {
     enum Failure: Error, Equatable {
-        /// The read-back after the write didn't match what was sent — the two
-        /// stdin copies disagreed (see the type's doc comment) or something
-        /// else clobbered the item between the write and the check.
+        /// The read-back after the write didn't match what was sent, once
+        /// both sides are base64-decoded — the write silently failed or
+        /// truncated, or something else clobbered the item between the write
+        /// and the check.
         case verificationFailed
         case failed(status: Int32)
+    }
+
+    /// Encodes a secret for the wire, base64 — see the type's doc comment for
+    /// why (no length cap workaround exists; whitespace in the payload
+    /// truncates in `security -i`'s own parser otherwise). Exposed so a
+    /// caller that reads the RAW Keychain value back through a DIFFERENT
+    /// path than this type's own `write` (e.g. `PulseOAuthStore.load`, via
+    /// `KeychainReader`) can decode it the same way, without re-deriving the
+    /// wire format in a second place.
+    static func encode(_ secret: String) -> String {
+        Data(secret.utf8).base64EncodedString()
+    }
+
+    /// The inverse of `encode`. Returns nil — never crashes, never throws —
+    /// on anything that isn't valid base64 of valid UTF-8, which is exactly
+    /// what a legacy or truncated item (written before this fix, or
+    /// corrupted some other way) looks like. A caller (`PulseOAuthStore`)
+    /// treats nil the same as "item not found": a bad decode is not this
+    /// account's fault and must not crash or wedge anything, only make the
+    /// grant read as absent until the next successful write (`-U`) replaces
+    /// it, which needs no separate delete step — `add-generic-password -U`
+    /// overwrites an existing item's value unconditionally, garbage or not
+    /// (verified live, see `scripts/verify-oauth-rotation.sh`).
+    static func decode(_ encoded: String) -> String? {
+        guard let data = Data(base64Encoded: encoded) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Guarantees a continuation is resumed exactly once across the racing
@@ -64,8 +115,12 @@ struct KeychainWriter: Sendable {
         try await runAdd(service: service, account: account, secret: secret, timeout: timeout)
 
         let reader = KeychainReader()
-        let stored = try? await reader.readGenericPassword(service: service, account: account, timeout: timeout)
-        guard stored == secret else {
+        let storedEncoded = try? await reader.readGenericPassword(service: service, account: account, timeout: timeout)
+        // Decoded on both sides of the comparison intentionally — comparing
+        // the raw encoded strings would pass even if `encode`/`decode` had
+        // drifted from each other (e.g. one base64 variant vs another), which
+        // is exactly the kind of bug this read-back exists to catch.
+        guard let storedEncoded, let stored = Self.decode(storedEncoded), stored == secret else {
             throw Failure.verificationFailed
         }
     }
@@ -115,13 +170,22 @@ struct KeychainWriter: Sendable {
         }
     }
 
+    /// Runs `add-generic-password -U` through `security -i` (interactive
+    /// mode), sending the whole command — including the base64-encoded
+    /// secret — on stdin rather than argv, and never as two separate typed
+    /// copies (there is nothing to mismatch in this mode). See the type's
+    /// doc comment for why: the two-copy stdin-PROMPT mode (`-w` with no
+    /// trailing value) this replaced silently capped every value at 128
+    /// bytes.
     private func runAdd(service: String, account: String, secret: String, timeout: TimeInterval) async throws {
+        let command = "add-generic-password -U -a \(account) -s \(service) -w \(Self.encode(secret))\n"
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let box = OnceBox()
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            process.arguments = ["add-generic-password", "-U", "-s", service, "-a", account, "-w"]
+            process.arguments = ["-i"]
             let stdin = Pipe()
             process.standardInput = stdin
             process.standardOutput = Pipe()
@@ -130,9 +194,8 @@ struct KeychainWriter: Sendable {
             process.terminationHandler = { finished in
                 guard box.claim() else { return }
                 // A non-zero status here is real (e.g. the binary itself
-                // failed to launch the keychain subsystem); a stdin-copy
-                // mismatch does NOT produce one — that is caught by the
-                // caller's read-back, not here.
+                // failed to launch the keychain subsystem). `-i` exits 0 when
+                // stdin (this one command, then EOF) is consumed cleanly.
                 if finished.terminationStatus == 0 {
                     continuation.resume()
                 } else {
@@ -147,12 +210,11 @@ struct KeychainWriter: Sendable {
                 return
             }
 
-            // Sent TWICE — the add/confirm prompt, not a retry. See the
-            // type's doc comment for the measured mismatch behaviour.
-            let line = Data("\(secret)\n".utf8)
             let handle = stdin.fileHandleForWriting
-            handle.write(line)
-            handle.write(line)
+            handle.write(Data(command.utf8))
+            // Closing stdin (EOF) ends the interactive session — no explicit
+            // `quit` command needed, and `quit` is not a recognized command
+            // in this mode anyway (measured: "unknown command \"quit\"").
             try? handle.close()
 
             let watched = process

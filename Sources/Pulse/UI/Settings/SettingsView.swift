@@ -398,6 +398,17 @@ private struct ClaudeSignInButton: View {
             case .listenerFailed: return "Couldn’t open a local port - port 53810 busy?"
             }
         }
+        // `PulseOAuthStore.signIn` persists the grant right after a
+        // successful browser round trip - a Keychain write failure this late
+        // used to fall through to the same bare "Sign-in failed" as a 400
+        // from the token endpoint, which is why a human saw one useless
+        // string for two unrelated causes (round 5). Named here instead.
+        if let keychainFailure = error as? KeychainWriter.Failure {
+            switch keychainFailure {
+            case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"
+            case .failed: return "Sign-in succeeded, but the Keychain didn’t respond - try again"
+            }
+        }
         return "Sign-in failed"
     }
 }
