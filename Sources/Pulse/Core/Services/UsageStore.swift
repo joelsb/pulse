@@ -46,6 +46,10 @@ struct ProviderRecord: Sendable {
     var isActiveRecently: Bool {
         guard let snapshot else { return false }
         if let primary = snapshot.primary, primary.utilization > 0 { return true }
+        // Codex idles its 5h (primary) window to 0% while the weekly (secondary)
+        // window still holds spend - observed 2026-09-17, primary 0% / secondary 8%,
+        // which dropped a connected Codex out of the menu bar.
+        if let secondary = snapshot.secondary, secondary.utilization > 0 { return true }
         return snapshot.dailyUsage.contains { $0.totals.total > 0 }
     }
 }

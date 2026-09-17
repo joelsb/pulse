@@ -370,6 +370,24 @@ struct ProviderRecordActivityTests {
         record.snapshot = usedThisWeek
         #expect(record.isActiveRecently)
     }
+
+    @Test func activityCountsSecondaryUtilizationWhenPrimaryIsIdle() {
+        var record = ProviderRecord()
+        var weeklySpend = UsageSnapshot(providerID: .codex)
+        weeklySpend.primary = LimitWindow(id: "five_hour", title: "5h", systemImage: "clock", utilization: 0)
+        weeklySpend.secondary = LimitWindow(id: "weekly", title: "Weekly", systemImage: "calendar", utilization: 8)
+        record.snapshot = weeklySpend
+        #expect(record.isActiveRecently)
+    }
+
+    @Test func activityStaysFalseWhenPrimaryAndSecondaryAreBothIdle() {
+        var record = ProviderRecord()
+        var fullyIdle = UsageSnapshot(providerID: .codex)
+        fullyIdle.primary = LimitWindow(id: "five_hour", title: "5h", systemImage: "clock", utilization: 0)
+        fullyIdle.secondary = LimitWindow(id: "weekly", title: "Weekly", systemImage: "calendar", utilization: 0)
+        record.snapshot = fullyIdle
+        #expect(!record.isActiveRecently)
+    }
 }
 
 @Suite("LimitWindow")
