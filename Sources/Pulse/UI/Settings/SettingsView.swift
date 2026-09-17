@@ -1,3 +1,4 @@
+import AppKit
 import ServiceManagement
 import SwiftUI
 
@@ -235,6 +236,13 @@ struct SettingsView: View {
                     }
                 }
             }
+            if id.isClaudeAccount {
+                Spacer(minLength: 8)
+                ClaudeSignInButton(id: id, environment: environment)
+            } else if id == .codex {
+                Spacer(minLength: 8)
+                CodexSignInButton(environment: environment)
+            }
         }
     }
 
@@ -296,5 +304,215 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+}
+
+/// "Sign in" for a Claude account row (JSB-8): mints Pulse's own OAuth grant
+/// via `PulseOAuthStore`, so this account's numbers stop depending on Claude
+/// Code, jcode or pi having refreshed a token recently.
+///
+/// Which account actually gets signed into is decided by the browser's own
+/// Anthropic session, not by which row's button was clicked — Pulse cannot
+/// pre-select an account for an OAuth authorize page any more than any other
+/// installed app can. The grant lands wherever `/oauth/profile` says it
+/// landed; if that isn't the row you clicked, sign in again from THAT
+/// account's own browser session.
+private struct ClaudeSignInButton: View {
+    let id: ProviderID
+    let environment: AppEnvironment
+
+    private enum Phase: Equatable {
+        case idle, working, succeeded(email: String?), failed(String)
+    }
+
+    @State private var phase: Phase = .idle
+
+    var body: some View {
+        HStack(spacing: 6) {
+            statusLabel
+            Button(action: signIn) {
+                if phase == .working {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Text("Sign in…")
+                }
+            }
+            .disabled(phase == .working)
+            .controlSize(.small)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch phase {
+        case .succeeded(let email):
+            Text(email.map { "Signed in as \($0)" } ?? "Signed in")
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.ok)
+        case .failed(let message):
+            Text(message)
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.critical)
+                .lineLimit(1)
+                .frame(maxWidth: 140, alignment: .trailing)
+        case .idle, .working:
+            EmptyView()
+        }
+    }
+
+    private func signIn() {
+        guard phase != .working else { return }
+        phase = .working
+        Task {
+            do {
+                let profile = try await environment.pulseOAuthStore.signIn { url in
+                    NSWorkspace.shared.open(url)
+                }
+                phase = .succeeded(email: profile.email)
+                // The account the grant landed on may not be `id`'s account
+                // (see the type's doc comment) — refresh everything so
+                // whichever card it actually belongs to updates right away,
+                // rather than waiting up to `refreshInterval`.
+                environment.scheduler.refreshAll()
+            } catch is CancellationError {
+                phase = .idle
+            } catch {
+                phase = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// Never includes token material — there is none in any error this flow
+    /// can throw (see `ClaudeOAuthClient`/`PulseOAuthStore`: every failure
+    /// path is a status code, a timeout, or a parse failure).
+    private static func message(for error: Error) -> String {
+        if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
+        if let tokenEndpointError = error as? ClaudeOAuthClient.TokenEndpointError {
+            switch tokenEndpointError {
+            case .invalidGrant: return "Sign-in was rejected - try again"
+            case .other(let status): return "Sign-in failed (\(status))"
+            }
+        }
+        if let listenerFailure = error as? LoopbackCallbackListener.Failure {
+            switch listenerFailure {
+            case .timeout: return "Timed out waiting for the browser"
+            case .deniedByProvider: return "Sign-in was declined"
+            case .invalidCallback: return "Unexpected sign-in response"
+            case .listenerFailed: return "Couldn’t open a local port - port 53810 busy?"
+            }
+        }
+        // `PulseOAuthStore.signIn` persists the grant right after a
+        // successful browser round trip - a Keychain write failure this late
+        // used to fall through to the same bare "Sign-in failed" as a 400
+        // from the token endpoint, which is why a human saw one useless
+        // string for two unrelated causes (round 5). Named here instead.
+        if let keychainFailure = error as? KeychainWriter.Failure {
+            switch keychainFailure {
+            case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"
+            case .failed: return "Sign-in succeeded, but the Keychain didn’t respond - try again"
+            case .lineTooLong: return "Sign-in succeeded, but the saved data was too long for the Keychain - this is a bug, not a retry-and-hope"
+            }
+        }
+        return "Sign-in failed"
+    }
+}
+
+/// "Sign in" for the Codex row (JSB-9), same shape as `ClaudeSignInButton`.
+/// Unlike Claude, Codex has exactly one Pulse-tracked account, so there is no
+/// "which row did it land on" ambiguity to caveat.
+private struct CodexSignInButton: View {
+    let environment: AppEnvironment
+
+    private enum Phase: Equatable {
+        case idle, working, succeeded(email: String?), failed(String)
+    }
+
+    @State private var phase: Phase = .idle
+
+    var body: some View {
+        HStack(spacing: 6) {
+            statusLabel
+            Button(action: signIn) {
+                if phase == .working {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Text("Sign in…")
+                }
+            }
+            .disabled(phase == .working)
+            .controlSize(.small)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch phase {
+        case .succeeded(let email):
+            Text(email.map { "Signed in as \($0)" } ?? "Signed in")
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.ok)
+        case .failed(let message):
+            Text(message)
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.critical)
+                .lineLimit(1)
+                .frame(maxWidth: 140, alignment: .trailing)
+        case .idle, .working:
+            EmptyView()
+        }
+    }
+
+    private func signIn() {
+        guard phase != .working else { return }
+        phase = .working
+        Task {
+            do {
+                let credentials = try await environment.codexOAuthStore.signIn { url in
+                    NSWorkspace.shared.open(url)
+                }
+                // Review nit 3: the masked-email claim is NOT id_token-only -
+                // `CodexAuth.accountLabel` reads it off the access token too,
+                // which `Credentials` DOES keep (constraint 7 only forbids the
+                // id_token). No new persistence, no new data - just reading
+                // what is already returned.
+                let label = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID).accountLabel
+                phase = .succeeded(email: label)
+                environment.scheduler.refreshAll()
+            } catch is CancellationError {
+                phase = .idle
+            } catch {
+                phase = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// Never includes token material — same discipline as `ClaudeSignInButton.message`.
+    private static func message(for error: Error) -> String {
+        if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
+        if let tokenEndpointError = error as? CodexOAuthClient.TokenEndpointError {
+            switch tokenEndpointError {
+            case .invalidGrant: return "Sign-in was rejected - try again"
+            case .other(let status): return "Sign-in failed (\(status))"
+            }
+        }
+        if let listenerFailure = error as? LoopbackCallbackListener.Failure {
+            switch listenerFailure {
+            case .timeout: return "Timed out waiting for the browser"
+            case .deniedByProvider: return "Sign-in was declined"
+            case .invalidCallback: return "Unexpected sign-in response"
+            // Constraint 1: port 1455 is the Codex CLI's OWN login port — a
+            // bind failure here almost always means a `codex login` is
+            // running at the same time, not a generic "port busy" cause.
+            case .listenerFailed: return "Couldn’t open port 1455 - a Codex CLI login may be in progress"
+            }
+        }
+        if let keychainFailure = error as? KeychainWriter.Failure {
+            switch keychainFailure {
+            case .verificationFailed: return "Sign-in succeeded, but saving it to the Keychain failed - try again"
+            case .failed: return "Sign-in succeeded, but the Keychain didn’t respond - try again"
+            case .lineTooLong: return "Sign-in succeeded, but the saved data was too long for the Keychain - this is a bug, not a retry-and-hope"
+            }
+        }
+        return "Sign-in failed"
     }
 }

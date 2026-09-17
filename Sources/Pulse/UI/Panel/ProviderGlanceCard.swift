@@ -82,10 +82,49 @@ struct ProviderGlanceCard: View {
                 Divider().overlay(PulseColor.hairline.opacity(0.6))
                 weekly(barWindow)
             }
+
+            if record.isStale {
+                staleCaption(for: snapshot)
+            }
         }
         .opacity(record.isStale ? 0.6 : 1)
         .animation(Motion.staleTint, value: record.isStale)
         .frame(maxWidth: .infinity)
+    }
+
+    /// "43m old - Rate limited by the provider - retrying at 11:44 PM": the
+    /// age of the numbers actually on screen, plus why they stopped updating.
+    /// Age reads `limitsCapturedAt` (the last successful capture, carried
+    /// forward by `UsageStore.apply` through every failed attempt since), or
+    /// `record.lastSuccess` for a provider that doesn't stamp it (bumped on
+    /// the same "real success only" rule, so never a claim to be fresher than
+    /// reality). Deliberately NO fallback to `snapshot.fetchedAt` beyond
+    /// that: `fetchedAt` is the timestamp of THIS attempt, which just failed
+    /// — falling back to it renders "0s old" over numbers that were never
+    /// captured at all (a provider whose limits have not once succeeded this
+    /// run), which is a MORE confident false claim than the bug this caption
+    /// exists to fix. When there is truly no capture time, show the reason
+    /// alone.
+    private func staleCaption(for snapshot: UsageSnapshot) -> some View {
+        let capturedAt = snapshot.limitsCapturedAt ?? record.lastSuccess
+        // The `?? "Limits unavailable"` here is unreachable by construction,
+        // not a real fallback (review round 2 nit 3): this function is only
+        // ever called under `record.isStale`, which is defined as
+        // `snapshot != nil && lastError != nil` — so `lastError` is always
+        // present at this call site. Left as a plain `??` rather than a
+        // force-unwrap: the defensive form costs nothing and survives a
+        // future caller that forgets the `isStale` guard, where a `!` would
+        // crash instead.
+        let reason = record.lastError?.userMessage ?? "Limits unavailable"
+        let text = capturedAt.map { captured in
+            "\(Formatters.duration(Date.now.timeIntervalSince(captured))) old - \(reason)"
+        } ?? reason
+        return Text(text)
+            .font(Typo.caption)
+            .foregroundStyle(PulseColor.warnStrong)
+            .lineLimit(2)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func ring(for window: LimitWindow) -> some View {

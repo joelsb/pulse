@@ -97,7 +97,7 @@ struct PricingTests {
     }
 
     @Test func unknownModelIsNil() {
-        #expect(PricingTable.pricing(forClaudeModel: "gpt-5.5") == nil)
+        #expect(PricingTable.pricing(forClaudeModel: "not-a-model-xyzzy") == nil)
     }
 }
 
@@ -275,6 +275,53 @@ struct UsageStoreResilienceTests {
         #expect(record.snapshot?.primary?.utilization == 42) // gauge survived the blip
         #expect(record.snapshot?.tertiary?.utilization == 24) // so did the Fable card
         #expect(record.snapshot?.tokens != nil)
+    }
+
+    // JSB-8: a carried-forward limits failure must stay visible on the
+    // record, not read back as a fresh success.
+    @Test func degradedLimitsStayStaleAndDoNotBumpFreshness() {
+        let store = UsageStore()
+        var healthy = snapshotWithGauge(.claude)
+        healthy.limitsCapturedAt = Date(timeIntervalSince1970: 1_000_000)
+        store.apply(healthy)
+
+        let firstSuccess = store.record(for: .claude).lastSuccess
+        #expect(firstSuccess != nil)
+        #expect(store.record(for: .claude).isStale == false)
+
+        var degraded = UsageSnapshot(providerID: .claude, fetchedAt: Date(timeIntervalSince1970: 2_000_000))
+        degraded.limitsUnavailable = true
+        degraded.limitsError = .rateLimited(retryAfter: 2808)
+
+        store.apply(degraded)
+        let record = store.record(for: .claude)
+
+        #expect(record.lastError == .rateLimited(retryAfter: 2808)) // isStale must be reachable
+        #expect(record.isStale)
+        #expect(record.lastSuccess == firstSuccess) // freshness clock did not move
+        #expect(record.snapshot?.limitsCapturedAt == healthy.limitsCapturedAt) // carried forward, not reset
+    }
+
+    // S1 (review round 1, 2026-09-08): `limitsUnavailable` alone is NOT a
+    // failure - Cursor sets it for an account with no plan gauge to report
+    // (a permanent, successful property of that plan) and carries no
+    // `limitsError`. Keying the freshness clock on `!limitsUnavailable`
+    // instead of `limitsError == nil` froze `lastSuccess` at nil forever for
+    // that provider, which froze PanelFooter's "Updated Xm ago" at "Waiting
+    // for first update…" permanently and defeated
+    // `refreshAll(ifOlderThan:)` (`lastSuccess ?? .distantPast` never ages).
+    @Test func limitsUnavailableWithNoErrorStillMovesTheFreshnessClock() {
+        let store = UsageStore()
+        var snapshot = UsageSnapshot(providerID: .cursor, fetchedAt: Date(timeIntervalSince1970: 1_000_000))
+        snapshot.limitsUnavailable = true // no plan gauge for this account
+        snapshot.limitsError = nil // NOT a failure - isStale must stay false
+
+        store.apply(snapshot)
+        let record = store.record(for: .cursor)
+
+        #expect(record.lastError == nil)
+        #expect(!record.isStale)
+        #expect(record.lastSuccess == snapshot.fetchedAt) // the clock DID move
     }
 
     @Test func derivedTrendsCoverAllThreeGauges() {

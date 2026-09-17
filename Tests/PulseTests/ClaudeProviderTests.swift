@@ -649,7 +649,7 @@ struct ClaudeMergeTests {
     }
 
     @Test func emptyAggregatesYieldNoReport() {
-        let bundle = ClaudeLogParser.rollUp([], calendar: calendar, now: now)
+        let bundle = ClaudeLogParser.rollUp([[ClaudeLogParser.Entry]](), calendar: calendar, now: now)
         #expect(bundle.tokens == nil)
         #expect(bundle.dailyUsage.isEmpty)
     }

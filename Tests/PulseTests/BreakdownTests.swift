@@ -345,7 +345,7 @@ struct CodexBreakdownTests {
         )
     }
 
-    @Test func rollupGroupsByCwdAndHasNoCost() {
+    @Test func rollupGroupsByCwdAndComputesCost() {
         let a1 = aggregate(cwd: "/Users/test/alpha", id: "a1", dayKey: "2026-06-18", input: 1000, lastActivity: now)
         let a2 = aggregate(cwd: "/Users/test/alpha", id: "a2", dayKey: "2026-06-17", input: 500, lastActivity: now)
         let b1 = aggregate(cwd: "/Users/test/beta", id: "b1", dayKey: "2026-06-18", input: 100, lastActivity: now)
@@ -355,7 +355,9 @@ struct CodexBreakdownTests {
         let alpha = projects[0]
         #expect(alpha.sessionCount == 2)
         #expect(alpha.totals.input == 1500)
-        #expect(alpha.totals.costUSD == nil) // plan-included, never a cost
+        // gpt-5-codex: $1.25 / MTok input, no output/cache tokens in this fixture:
+        // 1500 / 1_000_000 * 1.25 = 0.001875.
+        #expect(abs((alpha.totals.costUSD ?? 0) - 0.001875) < 0.0000001)
     }
 
     @Test func rollupFiltersByDayKey() {
@@ -467,7 +469,7 @@ struct DemoBreakdownDataTests {
 
     @Test func claudeDemoHasByteProjectsWithCostAndAnActiveSession() async throws {
         let breakdown = try #require(
-            await DemoBreakdownProvider(id: .claude).projectBreakdown(timeframe: .last30Days, now: now)
+            await DemoBreakdownProvider(id: .claude).projectBreakdown(timeframe: .last30Days, sources: .all, now: now)
         )
         #expect(breakdown.showsCost)
         #expect(Set(breakdown.projects.map(\.name)) == ["byte-pulse", "pulse-website", "byte-ui", "byte-api", "byte-cli"])
@@ -483,7 +485,7 @@ struct DemoBreakdownDataTests {
 
     @Test func codexDemoHasTokensButNoCostOrTitles() async throws {
         let breakdown = try #require(
-            await DemoBreakdownProvider(id: .codex).projectBreakdown(timeframe: .last30Days, now: now)
+            await DemoBreakdownProvider(id: .codex).projectBreakdown(timeframe: .last30Days, sources: .all, now: now)
         )
         #expect(!breakdown.showsCost)
         #expect(breakdown.grandTotal.total > 0)
@@ -493,7 +495,7 @@ struct DemoBreakdownDataTests {
     }
 
     @Test func unsupportedDemoProviderIsNil() async {
-        #expect(await DemoBreakdownProvider(id: .cursor).projectBreakdown(timeframe: .last7Days, now: now) == nil)
+        #expect(await DemoBreakdownProvider(id: .cursor).projectBreakdown(timeframe: .last7Days, sources: .all, now: now) == nil)
     }
 
     @Test func serviceAcceptsBreakdownProvidersDirectly() async {

@@ -51,6 +51,13 @@ struct UsageSnapshot: Sendable, Equatable {
     /// on-demand spend, Gemini per-model quotas, ...).
     var extraWindows: [LimitWindow] = []
 
+    /// When the limits gauges (`primary`/`secondary`/`tertiary`/`extraWindows`)
+    /// were actually captured by a successful fetch. Distinct from
+    /// `fetchedAt`, which stamps every attempt including ones that failed and
+    /// carried the previous windows forward — a stale card's age caption
+    /// reads this, or it would report "just now" over hours-old numbers.
+    var limitsCapturedAt: Date?
+
     var tokens: TokenUsageReport?
     /// Ascending by date; the last 7 days (kept as the canonical activity signal).
     var dailyUsage: [DailyUsage] = []

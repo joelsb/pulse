@@ -182,6 +182,32 @@ actor PiAccountResolver {
         SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16).description
     }
 
+    /// pi's `openai-codex` entry of the SAME `~/.pi/agent/auth.json` this type
+    /// already reads for its Anthropic keys — JSB-9 constraint "reuse existing
+    /// parsers, don't write a second one for a file another type already
+    /// reads". Distinct shape from the Anthropic entries (`access`/`refresh`/
+    /// `expires`, not nested under a provider array): `{"type":"oauth",
+    /// "access":"...","refresh":"...","expires":<ms>,"accountId":"..."}`.
+    /// Read-only, like `readAuth` — pi owns this token's refresh cycle, Pulse
+    /// never rotates it.
+    struct OpenAICodexCredential: Sendable {
+        var accessToken: String
+        /// Epoch milliseconds, pi's own convention (same as the Anthropic
+        /// entries `readAuth` parses).
+        var expiresAt: Double?
+        var accountID: String?
+    }
+
+    static func readOpenAICodexAuth(_ url: URL) -> OpenAICodexCredential? {
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entry = root["openai-codex"] as? [String: Any],
+              let access = entry["access"] as? String, !access.isEmpty
+        else { return nil }
+        let expires = (entry["expires"] as? NSNumber)?.doubleValue
+        return OpenAICodexCredential(accessToken: access, expiresAt: expires, accountID: entry["accountId"] as? String)
+    }
+
     // MARK: - Cache
 
     private func loadCacheIfNeeded() {
