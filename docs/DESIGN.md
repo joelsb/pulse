@@ -255,14 +255,15 @@ shift; also our anti-jitter strategy in the status bar, RESEARCH §1).
 | Footer "Updated 30s ago" | `system(size: 11)`, `.tertiary` |
 | Bottom-bar buttons | `system(size: 12, weight: .medium)` |
 | Chart axis labels (±30%) | `system(size: 9, weight: .medium).monospacedDigit()`, `.tertiary` |
-| Menu bar % (per provider row) | `system(size: 9, weight: .semibold, design: .rounded).monospacedDigit()`, `.foregroundStyle(.primary)` |
+| Menu bar top session % | `system(size: 9, weight: .semibold, design: .rounded).monospacedDigit()`, `.foregroundStyle(.primary)` |
+| Menu bar bottom weekly % / trend delta | `system(size: 10, weight: .medium, design: .rounded).monospacedDigit()`, `.secondary` for weekly, trend color (§2.4) for delta |
 | Menu bar provider code ("CL") | `system(size: 7, weight: .bold)`, uppercase, tracking `+0.5`, `.secondary` |
 | Menu bar trend arrow | SF Symbol at `7pt, .bold` |
 
 **Menu-bar legibility note (verify on hardware).** The menu bar is 24 pt tall
 ([HIG The Menu Bar](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar));
-two 9 pt rows with `spacing: 0` fit (cap height ≈ 6.4 pt — RESEARCH §1, "don't exceed
-~10pt per row"). 7 pt code letters sit **below the HIG 10 pt minimum** — this is the
+the top 9 pt session row and bottom 10 pt weekly/trend row keep `spacing: 0`
+(RESEARCH §1, "don't exceed ~10pt per row"). 7 pt code letters sit **below the HIG 10 pt minimum** — this is the
 accepted dense-menubar convention (iStat Menus / Stats ship 7–9 pt) and is mitigated by:
 bold weight, uppercase 2-letter codes, +0.5 tracking, `.primary`/`.secondary` dynamic
 colors, and the colored provider dot carrying identity redundantly. Keep 6.5 pt as the
@@ -309,10 +310,9 @@ Optical alignment beats geometric: SF Symbols next to text get manual `baselineO
 
 Two-row block per provider (up to 2 providers shown; more → Settings picks):
 
-```
-● CL 42% ↗      ← row: dot(5pt, accent) · 2pt · code(7pt bold, .secondary) · 2pt
-● CX 77% ↘         · pct(9pt semibold mono, .primary) · 2pt · arrow(7pt bold, trend color §2.4)
-```
+Top session number: 9 pt semibold, rounded, monospaced digits, `.primary`.
+Bottom weekly number or trend delta: 10 pt medium, rounded, monospaced digits,
+`.secondary` for weekly or trend color (§2.4) for delta.
 
 - Rows `spacing: 0`, block `.fixedSize()`, `hitTest → nil` click-through
   (RESEARCH §1, verified).
