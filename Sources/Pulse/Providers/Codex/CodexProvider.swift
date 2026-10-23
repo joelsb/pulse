@@ -165,10 +165,10 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
             applyFallbackLimits(fallback, to: &snapshot, now: now)
         }
 
-        if snapshot.primary == nil && snapshot.tokens == nil {
+        if snapshot.primary == nil && snapshot.secondary == nil && snapshot.tokens == nil {
             throw limitsError ?? .dataUnavailable(description: "No Codex usage data yet — run a Codex session first.")
         }
-        if snapshot.primary == nil {
+        if snapshot.primary == nil && snapshot.secondary == nil {
             snapshot.limitsUnavailable = true
             // Same reason as Claude: the scheduler cannot back off on a failure
             // it never sees. See UsageSnapshot.limitsError.

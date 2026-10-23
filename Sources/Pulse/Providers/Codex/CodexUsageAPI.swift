@@ -104,17 +104,30 @@ struct CodexUsageAPI: Sendable {
         return request
     }
 
-    /// Maps the response windows: primary → 5h session, secondary → weekly.
+    /// Maps by reported duration, falling back to position for unrecognized durations.
     /// `reset_at` (unix seconds) wins over the relative `reset_after_seconds`.
     static func limitWindows(
         from response: CodexUsageResponse,
         now: Date = .now
     ) -> (primary: LimitWindow?, secondary: LimitWindow?) {
-        let primary = resolve(response.rateLimit?.primaryWindow, now: now).map {
-            CodexLimitWindows.fiveHour(utilization: $0.used, resetsAt: $0.resetsAt, windowDuration: $0.duration)
-        }
-        let secondary = resolve(response.rateLimit?.secondaryWindow, now: now).map {
-            CodexLimitWindows.weekly(utilization: $0.used, resetsAt: $0.resetsAt, windowDuration: $0.duration)
+        var primary: LimitWindow?
+        var secondary: LimitWindow?
+        for (window, isSecondary) in [
+            (response.rateLimit?.primaryWindow, false),
+            (response.rateLimit?.secondaryWindow, true),
+        ] {
+            guard let resolved = resolve(window, now: now) else { continue }
+            let isWeekly: Bool
+            switch resolved.duration {
+            case 604800: isWeekly = true
+            case 18000: isWeekly = false
+            default: isWeekly = isSecondary
+            }
+            if isWeekly {
+                secondary = CodexLimitWindows.weekly(utilization: resolved.used, resetsAt: resolved.resetsAt, windowDuration: resolved.duration)
+            } else {
+                primary = CodexLimitWindows.fiveHour(utilization: resolved.used, resetsAt: resolved.resetsAt, windowDuration: resolved.duration)
+            }
         }
         return (primary, secondary)
     }

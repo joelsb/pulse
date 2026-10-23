@@ -202,6 +202,73 @@ struct CodexParsingTests {
         #expect(CodexUsageAPI.creditsNote(from: response) == "Credits: 1250")
     }
 
+    @Test func whamProliteWeekOnlyWindowMapsToWeeklyLimit() throws {
+        let json = Data(#"""
+        {"plan_type":"prolite",
+         "rate_limit":{
+           "primary_window":{"limit_window_seconds":604800,"used_percent":55,"reset_after_seconds":530114},
+           "secondary_window":null}}
+        """#.utf8)
+        let response = try JSONDecoder().decode(CodexUsageResponse.self, from: json)
+        let windows = CodexUsageAPI.limitWindows(
+            from: response, now: Date(timeIntervalSince1970: 1_765_000_000)
+        )
+        #expect(response.planType == "prolite")
+        #expect(windows.primary == nil)
+        #expect(windows.secondary?.title == "Weekly Limit")
+        #expect(windows.secondary?.id == "weekly")
+        #expect(windows.secondary?.utilization == 55)
+        #expect(windows.secondary?.windowDuration == 604800)
+        #expect(windows.secondary?.resetsAt == Date(timeIntervalSince1970: 1_765_530_114))
+    }
+
+    @Test(arguments: [false, true])
+    func weekOnlyFetchIsAvailable(hasTokenHistory: Bool) async throws {
+        let name = "pulse-week-only-\(UUID())"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let cacheFile = AppPaths.cacheDirectory.appendingPathComponent("\(name).json")
+        let day = CodexSessionParser.dayFormatter(calendar: .current).string(from: .now)
+        let sessions = root.appendingPathComponent("sessions")
+        let directory = sessions.appendingPathComponent(day.replacingOccurrences(of: "-", with: "/"))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: cacheFile)
+            #expect(!FileManager.default.fileExists(atPath: root.path))
+            #expect(!FileManager.default.fileExists(atPath: cacheFile.path))
+        }
+        let authFile = root.appendingPathComponent("auth.json")
+        // Expired fake JWT: no network candidate, but a signed-in fallback account.
+        try Data(#"{"tokens":{"access_token":"e30.eyJleHAiOjF9.fake"}}"#.utf8).write(to: authFile)
+        let info = hasTokenHistory
+            ? #", "info":{"total_token_usage":{"input_tokens":100,"output_tokens":10}}"# : ""
+        let line = #"""
+        {"timestamp":"\#(ISO8601DateFormatter().string(from: .now))","type":"event_msg",
+         "payload":{"type":"token_count"\#(info),"rate_limits":{"limit_id":"codex",
+           "primary":{"used_percent":0,"window_minutes":300,"resets_at":1},
+           "secondary":{"used_percent":55,"window_minutes":10080,"resets_at":4102444800}}}}
+        """#
+        // Expired session window is dropped, leaving only the valid weekly limit.
+        try line.replacingOccurrences(of: "\n", with: "").write(
+            to: directory.appendingPathComponent("rollout-test.jsonl"), atomically: true, encoding: .utf8
+        )
+        let provider = CodexProvider(
+            authFileURL: authFile,
+            jcodeStore: JcodeOpenAICredentialsStore(authFile: root.appendingPathComponent("missing-jcode.json")),
+            piAuthFileURL: root.appendingPathComponent("missing-pi.json"),
+            codexOAuthStore: CodexOAuthStore(account: name),
+            parser: CodexSessionParser(sessionsRoot: sessions, cacheName: name)
+        )
+        let snapshot = try await provider.fetch()
+        #expect(snapshot.primary == nil)
+        #expect(snapshot.secondary?.title == "Weekly Limit")
+        #expect(snapshot.secondary?.utilization == 55)
+        #expect(snapshot.tokens?.thisMonth.input == (hasTokenHistory ? 100 : nil))
+        #expect(!snapshot.limitsUnavailable)
+        #expect(snapshot.limitsError == nil)
+        #expect(snapshot.statusNotes.isEmpty)
+    }
+
     @Test func planClaimFromJWT() {
         func base64URL(_ string: String) -> String {
             Data(string.utf8).base64EncodedString()
