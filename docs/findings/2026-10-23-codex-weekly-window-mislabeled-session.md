@@ -129,7 +129,7 @@ Placement seam: `ProviderGlanceCard.windows(for:)` in ProviderGlanceCard.swift (
 Its only production caller is the card's content renderer, reached from simple mode in PanelRootView.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/UI/Panel/PanelRootView.swift`).
 RingGauge.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/UI/Components/RingGauge.swift`) has only that card as caller and accepts nil utilization for a track-only ring with `—`, no fill or pace tick.
 Card renders `5-Hour Session` and `not reported by Codex` instead of a reset for that missing window.
-No provider, store, full-view or installed-app changes.
+Implementation changed no provider, store or full-view behavior.
 
 Tests in ProviderGlanceCardTests.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Tests/PulseTests/ProviderGlanceCardTests.swift`) feed supplied weekly-only JSON through decoder, mapper and snapshot into placement.
 Traditional Codex plus another provider's weekly-only fallback are unchanged-behavior regressions, not additional behavior changes.
@@ -187,13 +187,23 @@ Build complete! (3.84s)
 git diff --check
 ```
 
-No separate lint target configured. Native live-account verification, installation, screenshot and exact-screen handoff remain with orchestrator after review/landing, by explicit agreement. Automated placement proof is not on-screen proof.
+No separate lint target configured. Automated placement proof is separate from the native proof below.
+
+### Installed-app native layout proof
+
+Layout fix commit: `87659be76bb7111c74e02f666e99e8f28f69b5d3`.
+On 2026-10-23, orchestrator installed main build and observed an empty Codex ring showing `—`, title `5-Hour Session`, caption `not reported by Codex`, then `Weekly Limit` with `26%` below.
+Screenshot evidence: screen-2026-10-23T15-46-33-765Z.png (`/var/folders/rj/56j7gm4d11nghvvwyhl_1ydh0000gn/T/screen-2026-10-23T15-46-33-765Z.png`).
+Solo agent inspected that supplied screenshot during this finding amendment and confirmed the same ring, labels and weekly bar.
+Orchestrator reported AX assertions printing `5-Hour Session: not reported by Codex | —`, `... | not reported by Codex`, and `Weekly Limit · 26% left ... | 26%`.
+At the same moment, orchestrator verified live API HTTP `200`, plan `prolite`, primary duration `604800` seconds with `74%` used, secondary `null`.
+That weekly-only payload reconciles to the displayed `26%` left, not a fabricated five-hour utilization or reset.
 
 ## Status
 
 Mapping/provider fix proven working: prior RED/GREEN, full 296-test suite and orchestrator's historical real-account verification above.
 Empty-session placement proven by solo agent's observed RED/GREEN on 2026-10-23, 10 targeted tests, full 299-test suite, source guards and build.
-Updated native layout remains unverified on screen pending orchestrator's live-account pass.
+Native layout proven working: orchestrator observed installed main build on 2026-10-23, checked AX assertions and reconciled the weekly bar against live API. Solo agent also inspected supplied screenshot.
 
 ## Do-not-undo
 
