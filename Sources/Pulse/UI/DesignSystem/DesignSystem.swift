@@ -199,6 +199,6 @@ enum Typo {
     static let barButton = Font.system(size: 12, weight: .medium)
     static let axisLabel = Font.system(size: 9, weight: .medium).monospacedDigit()
     static let menuBarValue = Font.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit()
-    static let menuBarDelta = Font.system(size: 8, weight: .medium, design: .rounded).monospacedDigit()
+    static let menuBarDelta = Font.system(size: 9, weight: .medium, design: .rounded).monospacedDigit()
     static let menuBarCode = Font.system(size: 7, weight: .bold)
 }
