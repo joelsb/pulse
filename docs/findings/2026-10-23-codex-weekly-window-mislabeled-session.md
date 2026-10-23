@@ -13,9 +13,9 @@ Payload contains valid usage and duration. Neither authentication changes nor ne
 
 ## Mechanism
 
-`CodexUsageAPI.limitWindows(from:now:)` in CodexUsageAPI.swift (`/Users/joelsbastos/.treehouse/pulse-46fde3/1/pulse/Sources/Pulse/Providers/Codex/CodexUsageAPI.swift`) unconditionally classified API primary as five-hour and secondary as weekly.
+`CodexUsageAPI.limitWindows(from:now:)` in CodexUsageAPI.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/Providers/Codex/CodexUsageAPI.swift`) unconditionally classified API primary as five-hour and secondary as weekly.
 API position is not window identity: prolite can return its only weekly window in primary.
-`CodexProvider.fetch()` in CodexProvider.swift (`/Users/joelsbastos/.treehouse/pulse-46fde3/1/pulse/Sources/Pulse/Providers/Codex/CodexProvider.swift`) is mapper's only production caller. It copied both windows correctly, but availability checks required primary even when secondary was valid.
+`CodexProvider.fetch()` in CodexProvider.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/Providers/Codex/CodexProvider.swift`) is mapper's only production caller. It copied both windows correctly, but availability checks required primary even when secondary was valid.
 Without tokens this threw; with tokens it marked limits unavailable, allowing store carry-forward behavior despite valid weekly data.
 
 Caller inspection also covered detail cards, glance-card fallback, menu-bar weekly utilization, snapshot window semantics and store activity. Existing views already render secondary-only gauges. No view changes needed.
@@ -30,7 +30,7 @@ No plan-name special case, network abstraction change, session parser change or 
 
 ## Proof
 
-Tests in ProviderTests.swift (`/Users/joelsbastos/.treehouse/pulse-46fde3/1/pulse/Tests/PulseTests/ProviderTests.swift`) use two seams: supplied prolite JSON through decoder and mapper, then secondary-only session-log fallback through `CodexProvider.fetch()` with and without token history.
+Tests in ProviderTests.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Tests/PulseTests/ProviderTests.swift`) use two seams: supplied prolite JSON through decoder and mapper, then secondary-only session-log fallback through `CodexProvider.fetch()` with and without token history.
 Fallback fixture has an expired five-hour window and valid weekly window. Expired fake JWT prevents network requests. Temporary files and unique parser cache are deleted in `defer`, with absence assertions.
 
 ### Mapper RED, before production edits
@@ -116,10 +116,17 @@ PASS: clean sources pass and every planted defect is caught
 
 No separate lint target configured. CI's three source guards passed. Existing test/linker warnings left untouched.
 
+### Live account and on-screen proof
+
+On 2026-10-23, orchestrator launched branch binary against Joel's real account and observed Codex `Weekly Limit`, `43%` left, `Resets in: 6 days 3h 0m`, and no Codex `5-Hour Session`.
+Orchestrator reconciled live endpoint with this UI result. This does not claim OpenAI supplied a five-hour window for this account.
+Screenshot evidence: screen-2026-10-23T14-32-53-380Z.png (`/var/folders/rj/56j7gm4d11nghvvwyhl_1ydh0000gn/T/screen-2026-10-23T14-32-53-380Z.png`).
+Solo agent also inspected supplied screenshot during finding amendment and confirmed displayed Codex title, value, reset and absence of a Codex session card.
+
 ## Status
 
-Proven working at tested seams: solo agent observed RED then GREEN on 2026-10-23, targeted legacy plus new regressions, full 296-test suite with isolated Foundation home, build and CI guards.
-No claim of live-account or on-screen app verification. Live sanitized payload was supplied evidence, replayed locally without production account access.
+proven working - solo agent observed RED then GREEN on 2026-10-23, targeted legacy plus new regressions, full 296-test suite with isolated Foundation home, build and CI guards.
+Orchestrator observed real-account UI on 2026-10-23 and reconciled live endpoint with `Weekly Limit`, `43%` left, `Resets in: 6 days 3h 0m`, and no Codex `5-Hour Session`.
 
 ## Do-not-undo
 
