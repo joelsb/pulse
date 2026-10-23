@@ -120,7 +120,7 @@ private struct ProviderStatBlock: View {
                     .animation(Motion.staleTint, value: record.isStale)
                 Text(Formatters.percent(weeklyDisplayValue))
                     .font(Typo.menuBarDelta)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
                     .contentTransition(.numericText(value: weeklyDisplayValue))
                     .animation(Motion.numberTick, value: weeklyDisplayValue)
             }

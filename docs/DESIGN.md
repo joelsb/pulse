@@ -256,7 +256,7 @@ shift; also our anti-jitter strategy in the status bar, RESEARCH §1).
 | Bottom-bar buttons | `system(size: 12, weight: .medium)` |
 | Chart axis labels (±30%) | `system(size: 9, weight: .medium).monospacedDigit()`, `.tertiary` |
 | Menu bar top session % | `system(size: 9, weight: .semibold, design: .rounded).monospacedDigit()`, `.foregroundStyle(.primary)` |
-| Menu bar bottom weekly % / trend delta | `system(size: 10, weight: .medium, design: .rounded).monospacedDigit()`, `.secondary` for weekly, trend color (§2.4) for delta |
+| Menu bar bottom weekly % / trend delta | `system(size: 10, weight: .medium, design: .rounded).monospacedDigit()`, `.primary` for weekly, trend color (§2.4) for delta |
 | Menu bar provider code ("CL") | `system(size: 7, weight: .bold)`, uppercase, tracking `+0.5`, `.secondary` |
 | Menu bar trend arrow | SF Symbol at `7pt, .bold` |
 
@@ -312,7 +312,7 @@ Two-row block per provider (up to 2 providers shown; more → Settings picks):
 
 Top session number: 9 pt semibold, rounded, monospaced digits, `.primary`.
 Bottom weekly number or trend delta: 10 pt medium, rounded, monospaced digits,
-`.secondary` for weekly or trend color (§2.4) for delta.
+`.primary` for weekly or trend color (§2.4) for delta.
 
 - Rows `spacing: 0`, block `.fixedSize()`, `hitTest → nil` click-through
   (RESEARCH §1, verified).
