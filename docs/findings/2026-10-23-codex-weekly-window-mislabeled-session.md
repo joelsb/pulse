@@ -18,7 +18,7 @@ API position is not window identity: prolite can return its only weekly window i
 `CodexProvider.fetch()` in CodexProvider.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/Providers/Codex/CodexProvider.swift`) is mapper's only production caller. It copied both windows correctly, but availability checks required primary even when secondary was valid.
 Without tokens this threw; with tokens it marked limits unavailable, allowing store carry-forward behavior despite valid weekly data.
 
-Caller inspection also covered detail cards, glance-card fallback, menu-bar weekly utilization, snapshot window semantics and store activity. Existing views already render secondary-only gauges. No view changes needed.
+Caller inspection also covered detail cards, glance-card fallback, menu-bar weekly utilization, snapshot window semantics and store activity. Existing views render secondary-only gauges, but simple/glance view previously promoted Codex's weekly window into the headline ring. Approved layout now reserves an empty `5-Hour Session` ring above the real weekly bar, without inventing session utilization or reset. Other providers retain their weekly-only fallback.
 
 ## Fix
 
@@ -116,17 +116,84 @@ PASS: clean sources pass and every planted defect is caught
 
 No separate lint target configured. CI's three source guards passed. Existing test/linker warnings left untouched.
 
-### Live account and on-screen proof
+### Historical mapping-only live account and on-screen proof
 
 On 2026-10-23, orchestrator launched branch binary against Joel's real account and observed Codex `Weekly Limit`, `43%` left, `Resets in: 6 days 3h 0m`, and no Codex `5-Hour Session`.
 Orchestrator reconciled live endpoint with this UI result. This does not claim OpenAI supplied a five-hour window for this account.
 Screenshot evidence: screen-2026-10-23T14-32-53-380Z.png (`/var/folders/rj/56j7gm4d11nghvvwyhl_1ydh0000gn/T/screen-2026-10-23T14-32-53-380Z.png`).
 Solo agent also inspected supplied screenshot during finding amendment and confirmed displayed Codex title, value, reset and absence of a Codex session card.
 
+### Empty-session layout follow-up
+
+Placement seam: `ProviderGlanceCard.windows(for:)` in ProviderGlanceCard.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/UI/Panel/ProviderGlanceCard.swift`).
+Its only production caller is the card's content renderer, reached from simple mode in PanelRootView.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/UI/Panel/PanelRootView.swift`).
+RingGauge.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Sources/Pulse/UI/Components/RingGauge.swift`) has only that card as caller and accepts nil utilization for a track-only ring with `—`, no fill or pace tick.
+Card renders `5-Hour Session` and `not reported by Codex` instead of a reset for that missing window.
+No provider, store, full-view or installed-app changes.
+
+Tests in ProviderGlanceCardTests.swift (`/Users/joelsbastos/MYNE/Projects/pulse/Tests/PulseTests/ProviderGlanceCardTests.swift`) feed supplied weekly-only JSON through decoder, mapper and snapshot into placement.
+Traditional Codex plus another provider's weekly-only fallback are unchanged-behavior regressions, not additional behavior changes.
+
+RED command, after exposing the existing private placement method as internal/static without changing its fallback:
+
+```sh
+swift test --disable-xctest -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib --filter ProviderGlanceCardTests
+```
+
+```text
+✘ Test codexWeeklyOnlyKeepsEmptySessionRingAboveWeeklyBar() recorded an issue at ProviderGlanceCardTests.swift:25:9: Expectation failed: (placement.bar?.id → nil) == "weekly"
+✘ Test run with 1 test in 1 suite failed after 0.009 seconds with 6 issues.
+```
+
+Same command after placement and rendering fix, before adding unchanged-behavior regressions:
+
+```text
+✔ Test codexWeeklyOnlyKeepsEmptySessionRingAboveWeeklyBar() passed after 0.001 seconds.
+✔ Test run with 1 test in 1 suite passed after 0.001 seconds.
+```
+
+Targeted command adds `--filter 'ProviderGlanceCardTests|CodexParsingTests'` instead of the single-suite filter:
+
+```text
+✔ Test codexWeeklyOnlyKeepsEmptySessionRingAboveWeeklyBar() passed after 0.001 seconds.
+✔ Test claudeWeeklyOnlyStillFallsBackToWeeklyRing() passed after 0.001 seconds.
+✔ Test traditionalCodexKeepsSessionRingAndWeeklyBar() passed after 0.001 seconds.
+✔ Test run with 10 tests in 2 suites passed after 0.037 seconds.
+```
+
+Full suite, including isolated Foundation home and cleanup:
+
+```sh
+set -o pipefail; testHome=$(mktemp -d /tmp/pulse-empty-session-test-home.XXXXXX); CFFIXED_USER_HOME="$testHome" swift test --disable-xctest -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib > /tmp/pulse-empty-session-full.log 2>&1; result=$?; grep -E 'error:|Expectation failed|Test run with' /tmp/pulse-empty-session-full.log; python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1]); assert not __import__("os").path.exists(sys.argv[1])' "$testHome"; exit "$result"
+```
+
+```text
+✔ Test run with 299 tests in 70 suites passed after 0.289 seconds.
+```
+
+Source guards, rate-limit verifier and build:
+
+```text
+python3 scripts/check-gauge-direction.py
+PASS: all 4 percentage surfaces honour the direction setting
+python3 scripts/check-panel-height.py
+OK: no measured panel column carries a stretching Spacer (2 files checked)
+python3 scripts/check-timeline-animation.py
+PASS: 26 view file(s), no animation restarts on every timeline tick
+bash scripts/verify-rate-limit-backoff.sh
+PASS: clean sources pass and every planted defect is caught
+swift build
+Build complete! (3.84s)
+git diff --check
+```
+
+No separate lint target configured. Native live-account verification, installation, screenshot and exact-screen handoff remain with orchestrator after review/landing, by explicit agreement. Automated placement proof is not on-screen proof.
+
 ## Status
 
-proven working - solo agent observed RED then GREEN on 2026-10-23, targeted legacy plus new regressions, full 296-test suite with isolated Foundation home, build and CI guards.
-Orchestrator observed real-account UI on 2026-10-23 and reconciled live endpoint with `Weekly Limit`, `43%` left, `Resets in: 6 days 3h 0m`, and no Codex `5-Hour Session`.
+Mapping/provider fix proven working: prior RED/GREEN, full 296-test suite and orchestrator's historical real-account verification above.
+Empty-session placement proven by solo agent's observed RED/GREEN on 2026-10-23, 10 targeted tests, full 299-test suite, source guards and build.
+Updated native layout remains unverified on screen pending orchestrator's live-account pass.
 
 ## Do-not-undo
 

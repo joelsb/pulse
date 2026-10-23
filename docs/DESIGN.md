@@ -366,8 +366,9 @@ bar or ⌘E). `full` is every card above. `simple` is the glance view:
 - **Session ring above, weekly bar below.** The session is what runs out in the next
   hour; the week is context for it. The first draft had this inverted and made the
   slower number the headline.
-- No session window published (Cursor, Gemini, an idle Claude account) → the ring falls
-  back to the weekly window and the bar is dropped.
+- No session window published (Cursor, Gemini, an idle Claude account): the ring falls back to the weekly window and the bar is dropped, except for Codex.
+  Codex with only a weekly window keeps an empty session ring on top: neutral track, centre `—`, title `5-Hour Session`, caption `not reported by Codex`, no utilization, pace tick or reset.
+  Its real `Weekly Limit` remains the bar below. Codex with both windows keeps the normal session ring and weekly bar.
 - Not scrolled: the view exists because it fits. Growth past the screen is a signal the
   view has outgrown its brief, not a reason to add a ScrollView.
 

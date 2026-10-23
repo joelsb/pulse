@@ -43,26 +43,22 @@ struct ProviderGlanceCard: View {
         }
     }
 
-    /// The ring takes the session window when there is one and falls back to
-    /// the weekly window when there is not.
-    ///
-    /// Not every provider has a 5-hour window: Cursor's primary is a monthly
-    /// plan, Gemini's is a daily quota, and a Claude account that has been idle
-    /// long enough for its session to expire publishes a weekly window and no
-    /// session at all. Without the fallback that account rendered a 164pt
-    /// column saying "No session window" while its weekly figure - the one
-    /// piece of information it had - was suppressed as the bar below it.
-    private func windows(for snapshot: UsageSnapshot) -> (ring: LimitWindow?, bar: LimitWindow?) {
+    /// Codex keeps an empty session slot above its weekly bar when no session
+    /// is reported. Other providers still promote weekly-only data to the ring.
+    static func windows(for snapshot: UsageSnapshot) -> (ring: LimitWindow?, bar: LimitWindow?) {
         if let primary = snapshot.primary { return (primary, snapshot.secondary) }
+        if snapshot.providerID == .codex { return (nil, snapshot.secondary) }
         return (snapshot.secondary, nil)
     }
 
     @ViewBuilder
     private func content(for snapshot: UsageSnapshot) -> some View {
-        let pair = windows(for: snapshot)
+        let pair = Self.windows(for: snapshot)
         VStack(spacing: 10) {
             if let ringWindow = pair.ring {
                 ring(for: ringWindow)
+            } else if pair.bar != nil {
+                ring(for: nil)
             } else {
                 // Say WHY, not just that there is nothing. A provider with no
                 // windows always knows the reason - an expired token, a 429, a
@@ -127,24 +123,31 @@ struct ProviderGlanceCard: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func ring(for window: LimitWindow) -> some View {
+    private func ring(for window: LimitWindow?) -> some View {
         VStack(spacing: 6) {
             RingGauge(
-                utilization: window.utilization,
-                paceMarker: settings.showPaceMarker ? window.elapsedFraction() : nil,
+                utilization: window?.utilization,
+                paceMarker: settings.showPaceMarker ? window?.elapsedFraction() : nil,
                 direction: direction,
-                caption: direction == .used ? "used" : "left"
+                caption: window == nil ? nil : (direction == .used ? "used" : "left")
             )
 
-            Text(window.title)
+            Text(window?.title ?? "5-Hour Session")
                 .font(Typo.caption)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
 
-            resetLine(for: window)
+            if let window {
+                resetLine(for: window)
+            } else {
+                Text("not reported by Codex")
+                    .font(Typo.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .frame(maxWidth: .infinity)
-        .help(help(for: window))
+        .help(window.map { help(for: $0) } ?? "5-Hour Session: not reported by Codex")
     }
 
     private func weekly(_ window: LimitWindow) -> some View {
