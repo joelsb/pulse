@@ -247,3 +247,138 @@ struct AccountRowTests {
         #expect(PulseColor.accent(b) != PulseColor.accent(.claudeConnected(uuid: "uuid-zz")))
     }
 }
+
+@Suite("Panel tabs honour the Panel switch with no fallback (JSB-112)")
+@MainActor
+struct PanelTabsTests {
+    private func settings() throws -> (SettingsStore, () -> Void) {
+        let suite = "pulse-tests-paneltabs-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        return (SettingsStore(defaults: defaults, providers: [.claude, b, .codex]), { defaults.removePersistentDomain(forName: suite) })
+    }
+
+    /// Account B under every Panel x Menu icon combination; Claude stays on.
+    @Test(arguments: [(true, true), (true, false), (false, true), (false, false)])
+    func everyCombinationOfTheTwoSwitches(panel: Bool, menu: Bool) throws {
+        let (s, cleanUp) = try settings()
+        defer { cleanUp() }
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        s.enabledProviders = [.claude] + (panel ? [b] : [])
+        s.menuBarProviders = Set([.claude] + (menu ? [b] : []))
+
+        let tabs = PanelTabs.visible(enabled: s.enabledProviders)
+        #expect(tabs.contains(b) == panel)
+        #expect(s.visibleMenuBarProviders.contains(b) == menu)
+        #expect(s.refreshedProviders.contains(b) == (panel || menu))
+    }
+
+    /// Every Panel switch off: no tab at all (never "show everything"), the
+    /// panel offers the way back, and menu-only accounts keep refreshing.
+    @Test func allPanelSwitchesOffShowsNoTabs() throws {
+        let (s, cleanUp) = try settings()
+        defer { cleanUp() }
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        s.enabledProviders = []
+        s.menuBarProviders = [b]
+
+        #expect(PanelTabs.visible(enabled: s.enabledProviders).isEmpty)
+        #expect(PanelTabs.selection(selected: .claude, tabs: []) == nil)
+        #expect(s.refreshedProviders == [b])
+
+        s.menuBarProviders = []
+        #expect(s.refreshedProviders.isEmpty)
+        #expect(s.visibleMenuBarProviders.isEmpty)
+        #expect(PanelTabs.emptyMessage.contains("Settings > Accounts"))
+    }
+
+    @Test func selectionFallsBackOnlyWithinVisibleTabs() {
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        #expect(PanelTabs.selection(selected: .codex, tabs: [.claude, b]) == .claude)
+        #expect(PanelTabs.selection(selected: b, tabs: [.claude, b]) == b)
+    }
+}
+
+@Suite("First-account Pulse sign-ins are managed (JSB-112)")
+struct PrimaryPulseGrantTests {
+    /// The Mac's own Claude row signs in only that account; any other account
+    /// would become a grant no provider reads and no row manages.
+    @Test func claudePrimarySignInAcceptsOnlyTheMacsOwnAccount() async throws {
+        let fixture = ClaudeFixture()
+        defer { fixture.cleanUp() }
+        let accounts = fixture.accounts(primary: ["uuid-a"])
+
+        #expect(try await accounts.signInPrimary(authorize: { authorization("AT-B", uuid: "uuid-b", email: "bob@example.com") }) == .mismatch(label: "bo…@example.com"))
+        #expect(await fixture.items().isEmpty)
+        #expect(await accounts.primaryHasPulseGrant() == false)
+
+        #expect(try await accounts.signInPrimary(authorize: { authorization("AT-A", uuid: "uuid-a", email: "alice@example.com") }) == .signedIn(label: "al…@example.com"))
+        #expect(await accounts.primaryHasPulseGrant())
+
+        // Sign out of Pulse: only Pulse's own items for that account go.
+        _ = try await accounts.add(authorize: { authorization("AT-B", uuid: "uuid-b", email: "bob@example.com") })
+        await accounts.forgetPrimary()
+        #expect(await accounts.primaryHasPulseGrant() == false)
+        #expect(await fixture.items().keys.sorted() == ["de.byte.pulse.oauth-pending|uuid-b", "de.byte.pulse.oauth|uuid-b"])
+    }
+
+    @Test func claudePrimarySignInWithoutAKnownMacAccountIsRefusedBeforeTheBrowser() async throws {
+        let fixture = ClaudeFixture()
+        defer { fixture.cleanUp() }
+        let opened = RefreshLogBox()
+        let outcome = try await fixture.accounts(primary: []).signInPrimary(authorize: {
+            await opened.mark()
+            return authorization("AT-A", uuid: "uuid-a", email: nil)
+        })
+        #expect(outcome == .unknownPrimary)
+        #expect(await opened.count == 0)
+        #expect(await fixture.items().isEmpty)
+    }
+
+    /// A grant left by an old `~/.claude-*` account becomes managed when that
+    /// account is added again in Settings.
+    @Test func legacyGrantIsManagedOnceTheAccountIsAddedAgain() async throws {
+        let fixture = ClaudeFixture()
+        defer { fixture.cleanUp() }
+        try await fixture.store.adopt(authorization("AT-OLD", uuid: "uuid-b", email: nil).credentials, accountUUID: "uuid-b")
+        let accounts = fixture.accounts()
+        #expect(try await accounts.add(authorize: { authorization("AT-B", uuid: "uuid-b", email: "bob@example.com") }) == .added(label: "bo…@example.com"))
+        await accounts.disconnect(uuid: "uuid-b")
+        #expect(await fixture.items().isEmpty)
+    }
+
+    /// The first Codex account's Pulse sign-in refuses an account already
+    /// connected as an extra, and can be signed out without touching extras.
+    @Test func codexPrimarySignInRefusesAnExtraAndCanBeSignedOut() async throws {
+        let secrets = InMemorySecretStore()
+        let suite = "pulse-tests-codex-primary-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let primary = CodexOAuthStore(verifyOverride: { _ in true }, secrets: secrets)
+        let accounts = CodexAccounts(index: CodexAccountIndex(defaults: defaults), secrets: secrets,
+                                     primaryAccountIDs: { [] }, fetchUsage: { _ in try JSONDecoder().decode(CodexUsageResponse.self, from: Data(#"{"plan_type":"plus"}"#.utf8)) })
+        _ = try await accounts.add(signIn: { pair("AT-B", "acct-B") })
+        let afterExtra = await secrets.snapshot()
+
+        #expect(try await accounts.signInPrimary(signIn: { pair("AT-B2", "acct-B") }, primary: primary) == .duplicate(label: nil))
+        #expect(await secrets.snapshot() == afterExtra)
+
+        #expect(try await accounts.signInPrimary(signIn: { pair("AT-A", "acct-A") }, primary: primary) == .signedIn(label: nil))
+        #expect(await primary.hasGrant())
+
+        await primary.forget()
+        #expect(await primary.hasGrant() == false)
+        #expect(await secrets.snapshot() == afterExtra)
+    }
+}
+
+private func pair(_ token: String, _ id: String) -> CodexOAuthClient.TokenPair {
+    let payload = Data(#"{"https://api.openai.com/auth":{"chatgpt_account_id":"\#(id)"}}"#.utf8).base64EncodedString()
+        .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+    return CodexOAuthClient.TokenPair(accessToken: token, refreshToken: "RT-\(token)", idToken: "e30.\(payload).sig", expiresAt: farFuture)
+}
+
+private actor RefreshLogBox {
+    private(set) var count = 0
+    func mark() { count += 1 }
+}

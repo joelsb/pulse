@@ -112,6 +112,42 @@ actor ClaudeAccounts {
         return .reconnected(label: label)
     }
 
+    enum PrimaryOutcome: Equatable, Sendable {
+        case signedIn(label: String?)
+        /// The browser signed in as another account: nothing written.
+        case mismatch(label: String?)
+        /// No Claude Code account on this Mac to check against: refused
+        /// before the browser opens (use Add account instead).
+        case unknownPrimary
+    }
+
+    /// Pulse's own grant for the Mac's Claude Code account (the first row).
+    /// Accepts only that account, so this button can never create a grant
+    /// that no provider reads and no row manages.
+    func signInPrimary(authorize: @Sendable () async throws -> PulseOAuthStore.Authorization) async throws -> PrimaryOutcome {
+        let primary = await primaryAccountUUIDs()
+        guard !primary.isEmpty else { return .unknownPrimary }
+        let authorization = try await authorize()
+        try Task.checkCancellation()
+        let label = Self.label(authorization.profile)
+        guard primary.contains(authorization.profile.uuid) else { return .mismatch(label: label) }
+        guard (try? await fetchUsage(authorization.credentials.accessToken)) != nil else { throw Failure.usageCheckFailed }
+        try Task.checkCancellation()
+        try await store.adopt(authorization.credentials, accountUUID: authorization.profile.uuid)
+        return .signedIn(label: label)
+    }
+
+    func primaryHasPulseGrant() async -> Bool {
+        for uuid in await primaryAccountUUIDs() where await store.hasGrant(forAccountUUID: uuid) { return true }
+        return false
+    }
+
+    /// Signs Pulse's own grant for the first account out; the row falls back
+    /// to Claude Code's own login, which is never touched.
+    func forgetPrimary() async {
+        for uuid in await primaryAccountUUIDs() { await store.forget(accountUUID: uuid) }
+    }
+
     /// Forgets Pulse's own grant for this account and keeps the row.
     func disconnect(uuid: String) async {
         await store.forget(accountUUID: uuid)

@@ -206,85 +206,13 @@ struct SettingsView: View {
 
 }
 
-/// "Sign in" for a Claude account row (JSB-8): mints Pulse's own OAuth grant
-/// via `PulseOAuthStore`, so this account's numbers stop depending on Claude
-/// Code, jcode or pi having refreshed a token recently.
-///
-/// Which account actually gets signed into is decided by the browser's own
-/// Anthropic session, not by which row's button was clicked — Pulse cannot
-/// pre-select an account for an OAuth authorize page any more than any other
-/// installed app can. The grant lands wherever `/oauth/profile` says it
-/// landed; if that isn't the row you clicked, sign in again from THAT
-/// account's own browser session.
-struct ClaudeSignInButton: View {
-    let id: ProviderID
-    let environment: AppEnvironment
-
-    private enum Phase: Equatable {
-        case idle, working, succeeded(email: String?), failed(String)
-    }
-
-    @State private var phase: Phase = .idle
-
-    var body: some View {
-        HStack(spacing: 6) {
-            statusLabel
-            Button(action: signIn) {
-                if phase == .working {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Text("Sign in…")
-                }
-            }
-            .disabled(phase == .working)
-            .controlSize(.small)
-        }
-    }
-
-    @ViewBuilder
-    private var statusLabel: some View {
-        switch phase {
-        case .succeeded(let email):
-            Text(email.map { "Signed in as \($0)" } ?? "Signed in")
-                .font(.system(size: 10))
-                .foregroundStyle(PulseColor.ok)
-        case .failed(let message):
-            Text(message)
-                .font(.system(size: 10))
-                .foregroundStyle(PulseColor.critical)
-                .lineLimit(1)
-                .frame(maxWidth: 140, alignment: .trailing)
-        case .idle, .working:
-            EmptyView()
-        }
-    }
-
-    private func signIn() {
-        guard phase != .working else { return }
-        phase = .working
-        Task {
-            do {
-                let profile = try await environment.pulseOAuthStore.signIn { url in
-                    NSWorkspace.shared.open(url)
-                }
-                phase = .succeeded(email: profile.email)
-                // The account the grant landed on may not be `id`'s account
-                // (see the type's doc comment) — refresh everything so
-                // whichever card it actually belongs to updates right away,
-                // rather than waiting up to `refreshInterval`.
-                environment.scheduler.refreshAll()
-            } catch is CancellationError {
-                phase = .idle
-            } catch {
-                phase = .failed(Self.message(for: error))
-            }
-        }
-    }
-
+/// Human messages for a failed browser sign-in. Never include token material:
+/// every failure these flows throw is a status code, a timeout or a parse error.
+enum SignInMessages {
     /// Never includes token material — there is none in any error this flow
     /// can throw (see `ClaudeOAuthClient`/`PulseOAuthStore`: every failure
     /// path is a status code, a timeout, or a parse failure).
-    static func message(for error: Error) -> String {
+    static func claude(_ error: Error) -> String {
         if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
         if let tokenEndpointError = error as? ClaudeOAuthClient.TokenEndpointError {
             switch tokenEndpointError {
@@ -314,79 +242,9 @@ struct ClaudeSignInButton: View {
         }
         return "Sign-in failed"
     }
-}
 
-/// "Sign in" for the Codex row (JSB-9), same shape as `ClaudeSignInButton`.
-/// This button always (re)signs the FIRST account's fixed slot; extra
-/// accounts come from `CodexAddAccountButton` (JSB-112).
-struct CodexSignInButton: View {
-    let environment: AppEnvironment
-
-    private enum Phase: Equatable {
-        case idle, working, succeeded(email: String?), failed(String)
-    }
-
-    @State private var phase: Phase = .idle
-
-    var body: some View {
-        HStack(spacing: 6) {
-            statusLabel
-            Button(action: signIn) {
-                if phase == .working {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Text("Sign in…")
-                }
-            }
-            .disabled(phase == .working)
-            .controlSize(.small)
-        }
-    }
-
-    @ViewBuilder
-    private var statusLabel: some View {
-        switch phase {
-        case .succeeded(let email):
-            Text(email.map { "Signed in as \($0)" } ?? "Signed in")
-                .font(.system(size: 10))
-                .foregroundStyle(PulseColor.ok)
-        case .failed(let message):
-            Text(message)
-                .font(.system(size: 10))
-                .foregroundStyle(PulseColor.critical)
-                .lineLimit(1)
-                .frame(maxWidth: 140, alignment: .trailing)
-        case .idle, .working:
-            EmptyView()
-        }
-    }
-
-    private func signIn() {
-        guard phase != .working else { return }
-        phase = .working
-        Task {
-            do {
-                let credentials = try await environment.codexOAuthStore.signIn { url in
-                    NSWorkspace.shared.open(url)
-                }
-                // Review nit 3: the masked-email claim is NOT id_token-only -
-                // `CodexAuth.accountLabel` reads it off the access token too,
-                // which `Credentials` DOES keep (constraint 7 only forbids the
-                // id_token). No new persistence, no new data - just reading
-                // what is already returned.
-                let label = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID).accountLabel
-                phase = .succeeded(email: label)
-                environment.scheduler.refreshAll()
-            } catch is CancellationError {
-                phase = .idle
-            } catch {
-                phase = .failed(Self.message(for: error))
-            }
-        }
-    }
-
-    /// Never includes token material — same discipline as `ClaudeSignInButton.message`.
-    static func message(for error: Error) -> String {
+    /// Never includes token material, same discipline as `claude(_:)`.
+    static func codex(_ error: Error) -> String {
         if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
         if let tokenEndpointError = error as? CodexOAuthClient.TokenEndpointError {
             switch tokenEndpointError {

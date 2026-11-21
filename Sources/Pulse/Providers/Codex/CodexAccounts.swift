@@ -95,6 +95,30 @@ actor CodexAccounts {
         return .reconnected(label: label)
     }
 
+    enum PrimaryOutcome: Equatable, Sendable {
+        case signedIn(label: String?)
+        /// Already connected as an extra account: nothing written.
+        case duplicate(label: String?)
+    }
+
+    /// Pulse's own grant for the first Codex account (`codex-primary`), with
+    /// the same checks as an add: never an account already connected as an
+    /// extra, and only once its usage reads.
+    func signInPrimary(signIn: @Sendable () async throws -> CodexOAuthClient.TokenPair, primary: CodexOAuthStore) async throws -> PrimaryOutcome {
+        let tokens = try await signIn()
+        try Task.checkCancellation()
+        let credentials = CodexOAuthStore.credentialsFromSignIn(tokens)
+        let label = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID).accountLabel
+        guard let accountID = credentials.accountID, !accountID.isEmpty else { throw AddFailure.unidentified }
+        if index.load().contains(where: { $0.accountID == accountID }) { return .duplicate(label: label) }
+        guard (try? await fetchUsage(CodexAuth(accessToken: credentials.accessToken, accountID: accountID))) != nil else {
+            throw AddFailure.usageCheckFailed
+        }
+        try Task.checkCancellation()
+        try await primary.adopt(credentials)
+        return .signedIn(label: label)
+    }
+
     /// Forgets Pulse's own grant for this account (its two Keychain items)
     /// and keeps the row. Never touches `codex-primary` or the Codex CLI login.
     func disconnect(slot: String) async {

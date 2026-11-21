@@ -33,7 +33,7 @@ struct PanelRootView: View {
     private var store: UsageStore { environment.store }
 
     private var tabs: [ProviderID] {
-        settings.enabledProviders.isEmpty ? ProviderID.allCases : settings.enabledProviders
+        PanelTabs.visible(enabled: settings.enabledProviders)
     }
 
     /// Width of one provider column: the same content width a single tab gets,
@@ -74,9 +74,12 @@ struct PanelRootView: View {
         showsSystem ? Layout.systemColumnWidth + Layout.cardGap : 0
     }
 
+    /// Nil only when every account's Panel switch is off.
     private var selection: ProviderID {
-        tabs.contains(settings.selectedTab) ? settings.selectedTab : tabs[0]
+        PanelTabs.selection(selected: settings.selectedTab, tabs: tabs) ?? settings.selectedTab
     }
+
+    private var hasTabs: Bool { !tabs.isEmpty }
 
     var body: some View {
         // The tree only exists while presented: TimelineViews, tasks, and
@@ -102,12 +105,12 @@ struct PanelRootView: View {
     /// Panel width: the optional stats sidebar, plus one column, or N columns
     /// and the gaps between them.
     private var contentWidth: CGFloat {
-        if isSimple {
+        if isSimple, hasTabs {
             let count = CGFloat(glanceColumns.count)
             return count * Layout.glanceColumnWidth + (count - 1) * Layout.cardGap
                 + 2 * Layout.panelPadding + systemWidth
         }
-        guard isColumns else { return Layout.panelWidth + systemWidth }
+        guard hasTabs, isColumns else { return Layout.panelWidth + systemWidth }
         let count = CGFloat(columns.count)
         return count * columnWidth + (count - 1) * Layout.cardGap + 2 * Layout.panelPadding + systemWidth
     }
@@ -132,7 +135,10 @@ struct PanelRootView: View {
                     )
                 }
 
-                if isSimple {
+                if !hasTabs {
+                    NoPanelAccountsView(openSettings: onOpenSettings)
+                        .frame(width: columnWidth)
+                } else if isSimple {
                     glanceArea
                 } else if isColumns {
                     columnArea
@@ -163,9 +169,10 @@ struct PanelRootView: View {
             }
 
             PanelBottomBar(
-                providerName: environment.descriptor(for: selection).name,
+                providerName: hasTabs ? environment.descriptor(for: selection).name : "Accounts",
                 mode: settings.panelMode,
                 openProvider: {
+                    guard hasTabs else { return onOpenSettings() }
                     environment.openProvider(selection)
                     onClose()
                 },
@@ -342,5 +349,30 @@ struct PanelRootView: View {
         .opacity(0)
         .frame(width: 0, height: 0)
         .accessibilityHidden(true)
+    }
+}
+
+
+/// Shown instead of tabs when every account's Panel switch is off: says why
+/// the panel is empty and leads back to the switches.
+struct NoPanelAccountsView: View {
+    let openSettings: () -> Void
+
+    var body: some View {
+        CardView {
+            VStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.secondary)
+                Text(PanelTabs.emptyMessage)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Open Settings > Accounts", action: openSettings)
+                    .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        }
     }
 }

@@ -20,11 +20,13 @@ struct AccountsSection: View {
     @State private var notes: [ProviderID: Note] = [:]
     @State private var confirm: Confirm?
     @State private var relaunchNeeded = false
+    /// Whether Pulse holds its own grant for the first Claude / Codex account.
+    @State private var primaryGrant: [ProviderID: Bool] = [:]
 
     struct Note: Equatable { var text: String; var isError: Bool }
 
     struct Confirm: Identifiable {
-        enum Kind { case disconnect, remove }
+        enum Kind { case disconnect, remove, signOutPulse }
         let account: ProviderID
         let kind: Kind
         let name: String
@@ -72,11 +74,9 @@ struct AccountsSection: View {
         .task { await reload() }
         .alert(item: $confirm) { item in
             Alert(
-                title: Text(item.kind == .disconnect ? "Disconnect \(item.name)?" : "Remove \(item.name)?"),
-                message: Text(item.kind == .disconnect
-                    ? "Pulse deletes its own sign-in for this account and stops reading its usage. The account itself and every other sign-in on this Mac stay as they are."
-                    : "Pulse forgets this account: its row, tab and menu icon block."),
-                primaryButton: .destructive(Text(item.kind == .disconnect ? "Disconnect" : "Remove")) { perform(item) },
+                title: Text(Self.confirmTitle(item)),
+                message: Text(Self.confirmMessage(item)),
+                primaryButton: .destructive(Text(Self.confirmButton(item))) { perform(item) },
                 secondaryButton: .cancel { note(AccountRow.family(of: item.account), "Cancelled. Nothing changed.") }
             )
         }
@@ -115,12 +115,19 @@ struct AccountsSection: View {
     private func actions(_ row: AccountRow) -> some View {
         switch row.kind {
         case .local:
-            // The Mac's own login: Pulse can mint its own grant for Claude and
-            // Codex (unchanged JSB-8/JSB-9 buttons); it never signs a tool out.
-            if row.id == .claude {
-                ClaudeSignInButton(id: row.id, environment: environment)
-            } else if row.id == .codex {
-                CodexSignInButton(environment: environment)
+            // The first account: Pulse may hold its own grant for it (Claude,
+            // Codex). Signing that grant out never touches the tool's login.
+            if row.id == .claude || row.id == .codex {
+                let hasGrant = primaryGrant[row.id] == true
+                Button(hasGrant ? "Reconnect…" : "Sign in…") { signInPrimary(row.id) }
+                    .controlSize(.small)
+                    .disabled(busy != nil)
+                    .help("Pulse's own sign-in for this account, refreshed by Pulse instead of the tool.")
+                if hasGrant {
+                    Button("Sign out of Pulse…") { confirm = Confirm(account: row.id, kind: .signOutPulse, name: row.name) }
+                        .controlSize(.small)
+                        .foregroundStyle(PulseColor.critical)
+                }
             }
         case .connected(let disconnected):
             Button("Reconnect…") { reconnect(row) }
@@ -147,7 +154,10 @@ struct AccountsSection: View {
         case .connected(true):
             return "Disconnected"
         case .local:
-            return AccountCapability.localSource(row.id) + " · " + status(row.id)
+            let source = primaryGrant[row.id] == true
+                ? AccountCapability.pulseSource(row.id)
+                : AccountCapability.localSource(row.id)
+            return source + " · " + status(row.id)
         case .connected(false):
             return status(row.id)
         }
@@ -198,6 +208,58 @@ struct AccountsSection: View {
     private func reload() async {
         claudeEntries = await environment.claudeAccounts.entries()
         codexEntries = await environment.codexAccounts.entries()
+        primaryGrant[.claude] = await environment.claudeAccounts.primaryHasPulseGrant()
+        primaryGrant[.codex] = await environment.codexOAuthStore.hasGrant()
+    }
+
+    private func signInPrimary(_ family: ProviderID) {
+        let environment = environment
+        run(family) {
+            if family == .claude {
+                switch try await environment.claudeAccounts.signInPrimary(authorize: {
+                    try await environment.pulseOAuthStore.authorize { NSWorkspace.shared.open($0) }
+                }) {
+                case .signedIn(let label): return "Signed in as \(label ?? "this Mac's Claude account")."
+                case .mismatch(let label):
+                    return "The browser signed in as \(label ?? "another account"), not this Mac's Claude Code account. Use Add account… for it. Nothing changed."
+                case .unknownPrimary:
+                    return "No Claude Code account found on this Mac to sign in for. Use Add account… instead. Nothing changed."
+                }
+            }
+            switch try await environment.codexAccounts.signInPrimary(signIn: {
+                try await CodexOAuthClient().signIn { NSWorkspace.shared.open($0) }
+            }, primary: environment.codexOAuthStore) {
+            case .signedIn(let label): return "Signed in as \(label ?? "the first Codex account")."
+            case .duplicate(let label): return "\(label ?? "That account") is already connected below. Nothing changed."
+            }
+        }
+    }
+
+    private static func confirmTitle(_ item: Confirm) -> String {
+        switch item.kind {
+        case .disconnect: "Disconnect \(item.name)?"
+        case .remove: "Remove \(item.name)?"
+        case .signOutPulse: "Sign \(item.name) out of Pulse?"
+        }
+    }
+
+    private static func confirmMessage(_ item: Confirm) -> String {
+        switch item.kind {
+        case .disconnect:
+            "Pulse deletes its own sign-in for this account and stops reading its usage. The account itself and every other sign-in on this Mac stay as they are."
+        case .remove:
+            "Pulse forgets this account: its row, tab and menu icon block."
+        case .signOutPulse:
+            "Pulse deletes its own sign-in for this account and reads \(AccountCapability.localSource(item.account).lowercased()) again. That login is not touched."
+        }
+    }
+
+    private static func confirmButton(_ item: Confirm) -> String {
+        switch item.kind {
+        case .disconnect: "Disconnect"
+        case .remove: "Remove"
+        case .signOutPulse: "Sign out of Pulse"
+        }
     }
 
     private func run(_ family: ProviderID, _ work: @escaping @MainActor () async throws -> String) {
@@ -282,6 +344,10 @@ struct AccountsSection: View {
         Task { @MainActor in
             do {
                 switch item.kind {
+                case .signOutPulse:
+                    if item.account == .claude { await environment.claudeAccounts.forgetPrimary() }
+                    if item.account == .codex { await environment.codexOAuthStore.forget() }
+                    note(family, "\(item.name) signed out of Pulse.")
                 case .disconnect:
                     if let uuid = row?.claudeUUID { await environment.claudeAccounts.disconnect(uuid: uuid) }
                     if let slot = row?.codexSlot { await environment.codexAccounts.disconnect(slot: slot) }
@@ -313,7 +379,7 @@ struct AccountsSection: View {
         case ClaudeAccounts.Failure.stillConnected, CodexAccounts.AddFailure.stillConnected:
             return "Disconnect the account before removing it."
         default:
-            return family == .claude ? ClaudeSignInButton.message(for: error) : CodexSignInButton.message(for: error)
+            return family == .claude ? SignInMessages.claude(error) : SignInMessages.codex(error)
         }
     }
 
@@ -430,6 +496,15 @@ struct AccountRow: Identifiable, Equatable {
 enum AccountCapability {
     static func canAddAccounts(_ family: ProviderID) -> Bool {
         family == .claude || family == .codex
+    }
+
+    /// The first row when Pulse holds its own grant for it.
+    static func pulseSource(_ family: ProviderID) -> String {
+        switch family {
+        case .claude: "Pulse sign-in for this Mac's Claude Code account"
+        case .codex: "Pulse sign-in (first Codex account)"
+        default: localSource(family)
+        }
     }
 
     static func localSource(_ family: ProviderID) -> String {
