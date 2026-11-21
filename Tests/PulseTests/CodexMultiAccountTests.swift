@@ -56,6 +56,10 @@ actor InMemorySecretStore: CodexSecretStore {
         items[key(service, account)] = nil
     }
 
+    func exists(service: String, account: String) async throws -> Bool {
+        items[key(service, account)] != nil
+    }
+
     func snapshot() -> [String: String] { items }
 }
 
@@ -267,6 +271,118 @@ struct CodexMultiAccountTests {
         #expect(await fixture.secrets.snapshot().filter { $0.key.hasSuffix("|codex-primary") } == primaryBefore)
     }
 
+    /// A different account already owns B's derived slot (a 28-bit digest
+    /// collision, planted here): B must land elsewhere and the owner's grant
+    /// must stay byte for byte.
+    @Test func slotCollisionWithAnotherAccountNeverOverwritesItsGrant() async throws {
+        let (fixture, _, accounts, _) = try await seeded()
+        defer { fixture.cleanUp() }
+        let collided = CodexAccounts.slot(forAccountID: "acct-B")
+        let owner = CodexOAuthStore.Credentials(accessToken: "AT-OWNER", refreshToken: "RT-OWNER", expiresAt: farFuture, accountID: "acct-OWNER")
+        try await fixture.secrets.write(service: "de.byte.pulse.codex-oauth", account: collided, secret: CodexOAuthStore.encode(owner))
+        CodexAccountIndex(defaults: fixture.defaults).save([CodexAccountEntry(slot: collided, accountID: "acct-OWNER", label: "ow…@example.com")])
+        let ownerSecret = await fixture.secrets.snapshot()["de.byte.pulse.codex-oauth|\(collided)"]
+
+        #expect(try await accounts.add(signIn: { pair(tokenB, accountID: "acct-B") }) == .added(label: "bo…@example.com"))
+
+        #expect(await fixture.secrets.snapshot()["de.byte.pulse.codex-oauth|\(collided)"] == ownerSecret)
+        let entries = await accounts.entries()
+        #expect(entries.map(\.accountID) == ["acct-OWNER", "acct-B"])
+        let bSlot = try #require(entries.last?.slot)
+        #expect(bSlot != collided)
+        #expect(bSlot != "codex-primary")
+        #expect(bSlot.count == "codex-primary".count)
+        let storedB = try CodexOAuthStore.decode(await fixture.secrets.read(service: "de.byte.pulse.codex-oauth", account: bSlot))
+        #expect(storedB.accountID == "acct-B")
+    }
+
+    /// An orphaned Keychain item (no index entry) in the derived slot is not
+    /// Pulse's to overwrite either.
+    @Test func orphanedItemInTheDerivedSlotIsNotOverwritten() async throws {
+        let (fixture, _, accounts, _) = try await seeded()
+        defer { fixture.cleanUp() }
+        let derived = CodexAccounts.slot(forAccountID: "acct-B")
+        try await fixture.secrets.write(service: "de.byte.pulse.codex-oauth-pending", account: derived, secret: "orphan")
+
+        _ = try await accounts.add(signIn: { pair(tokenB, accountID: "acct-B") })
+
+        #expect(await fixture.secrets.snapshot()["de.byte.pulse.codex-oauth-pending|\(derived)"] == "orphan")
+        #expect(await accounts.entries().map(\.slot) != [derived])
+    }
+
+    /// Two adds of the same account interleaving across the actor's
+    /// suspension points (usage check) must save it once.
+    @Test func concurrentAddsOfTheSameAccountSaveItOnce() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let fast = Fixture.fetcher([tokenA: usage(session: 10, weekly: 20), tokenB: usage(session: 40, weekly: 70)])
+        let slow: @Sendable (CodexAuth) async throws -> CodexUsageResponse = { auth in
+            try await Task.sleep(for: .milliseconds(100))
+            return try await fast(auth)
+        }
+        let primary = fixture.primaryStore(fetcher: fast)
+        try await primary.adopt(CodexOAuthStore.Credentials(accessToken: tokenA, refreshToken: "RT-A", expiresAt: farFuture, accountID: "acct-A"))
+        let accounts = fixture.accounts(primary: primary, fetcher: slow)
+
+        async let first = accounts.add(signIn: { pair(tokenB, accountID: "acct-B", refresh: "RT-B1") })
+        async let second = accounts.add(signIn: { pair(tokenB, accountID: "acct-B", refresh: "RT-B2") })
+        let outcomes = try await [first, second]
+
+        #expect(outcomes.filter { $0 == .added(label: "bo…@example.com") }.count == 1)
+        #expect(outcomes.filter { $0 == .duplicate(label: "bo…@example.com") }.count == 1)
+        #expect(await accounts.entries().map(\.accountID) == ["acct-B"])
+    }
+
+    /// A dead grant clears its Keychain items but keeps its index entry; its
+    /// slot still belongs to that account and must not be handed to another.
+    @Test func indexedSlotWithoutKeychainItemIsStillTaken() async throws {
+        let (fixture, _, accounts, _) = try await seeded()
+        defer { fixture.cleanUp() }
+        let collided = CodexAccounts.slot(forAccountID: "acct-B")
+        CodexAccountIndex(defaults: fixture.defaults).save([CodexAccountEntry(slot: collided, accountID: "acct-OWNER", label: nil)])
+
+        _ = try await accounts.add(signIn: { pair(tokenB, accountID: "acct-B") })
+
+        let entries = await accounts.entries()
+        #expect(entries.map(\.accountID) == ["acct-OWNER", "acct-B"])
+        #expect(entries.last?.slot != collided)
+    }
+
+    /// Another writer (a second Pulse instance) indexes the same account while
+    /// this add waits on the usage check: the add must back off.
+    @Test func accountIndexedDuringVerificationIsADuplicate() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let otherInstance = CodexAccountIndex(defaults: fixture.defaults)
+        let fetcher: @Sendable (CodexAuth) async throws -> CodexUsageResponse = { _ in
+            otherInstance.save([CodexAccountEntry(slot: "codex-elsewh", accountID: "acct-B", label: nil)])
+            return usage(session: 40, weekly: 70)
+        }
+        let accounts = CodexAccounts(index: CodexAccountIndex(defaults: fixture.defaults), secrets: fixture.secrets, primaryAccountIDs: { [] }, fetchUsage: fetcher)
+
+        #expect(try await accounts.add(signIn: { pair(tokenB, accountID: "acct-B") }) == .duplicate(label: "bo…@example.com"))
+        #expect(await fixture.secrets.snapshot().isEmpty)
+        #expect(await accounts.entries().count == 1)
+    }
+
+    /// When the Keychain cannot say whether a slot is free, the add aborts.
+    @Test func unanswerableSlotCheckAbortsWithoutWriting() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let blind = BlindExistsStore(inner: fixture.secrets)
+        let accounts = CodexAccounts(
+            index: CodexAccountIndex(defaults: fixture.defaults),
+            secrets: blind,
+            primaryAccountIDs: { [] },
+            fetchUsage: Fixture.fetcher([tokenB: usage(session: 40, weekly: 70)])
+        )
+        await #expect(throws: CodexAccounts.AddFailure.slotCheckFailed) {
+            try await accounts.add(signIn: { pair(tokenB, accountID: "acct-B") })
+        }
+        #expect(await fixture.secrets.snapshot().isEmpty)
+        #expect(await accounts.entries() == [])
+    }
+
     @Test func extraAccountWithoutAGrantSaysSignInAgain() async throws {
         let fixture = Fixture()
         defer { fixture.cleanUp() }
@@ -275,6 +391,16 @@ struct CodexMultiAccountTests {
         let rows = await accounts.usages()
         #expect(rows == [AccountUsage(id: "codex-0000000", label: "zz…@example.com", note: "Sign in again from Settings")])
     }
+}
+
+/// Answers reads and writes, but can never say whether an item exists -
+/// the Keychain's "timed out / access denied" case.
+private struct BlindExistsStore: CodexSecretStore {
+    let inner: InMemorySecretStore
+    func read(service: String, account: String) async throws -> String { try await inner.read(service: service, account: account) }
+    func write(service: String, account: String, secret: String) async throws { try await inner.write(service: service, account: account, secret: secret) }
+    func delete(service: String, account: String) async throws { try await inner.delete(service: service, account: account) }
+    func exists(service: String, account: String) async throws -> Bool { throw KeychainReader.Failure.accessDeniedOrTimeout }
 }
 
 private actor RefreshLog {

@@ -44,6 +44,8 @@ actor CodexAccounts {
         case unidentified
         /// The new grant could not read its own usage: nothing was written.
         case usageCheckFailed
+        /// No free Keychain slot could be confirmed: nothing was written.
+        case slotCheckFailed
     }
 
     private let index: CodexAccountIndex
@@ -69,13 +71,24 @@ actor CodexAccounts {
 
     func entries() -> [CodexAccountEntry] { index.load() }
 
-    /// Keychain account name for an extra account: derived from its account
-    /// id, so the same account always maps to the same slot, and as short as
-    /// `codex-primary` to stay inside `KeychainWriter`'s command-line budget.
-    static func slot(forAccountID accountID: String) -> String {
-        let digest = SHA256.hash(data: Data(accountID.utf8)).map { String(format: "%02x", $0) }.joined()
+    /// Preferred Keychain account name for an extra account: as short as
+    /// `codex-primary`, to stay inside `KeychainWriter`'s command-line
+    /// budget. Only 28 bits, so it is a PREFERENCE, never proof the slot is
+    /// free: `allocateSlot` checks that before anything is written.
+    static func slot(forAccountID accountID: String, attempt: Int = 0) -> String {
+        let seed = attempt == 0 ? accountID : "\(accountID)#\(attempt)"
+        let digest = SHA256.hash(data: Data(seed.utf8)).map { String(format: "%02x", $0) }.joined()
         return "codex-" + digest.prefix(7)
     }
+
+    private static let maxSlotAttempts = 16
+    private static let services = ["de.byte.pulse.codex-oauth", "de.byte.pulse.codex-oauth-pending"]
+
+    /// Account ids with an add in progress, and slots reserved by one. Both
+    /// are claimed synchronously on the actor, so two adds interleaving over
+    /// an `await` can never pick the same account or the same slot.
+    private var addingAccountIDs: Set<String> = []
+    private var reservedSlots: Set<String> = []
 
     /// Browser sign-in, then identity and usage checks, and only then a write.
     /// A cancelled or failed sign-in throws before any storage is touched.
@@ -86,17 +99,56 @@ actor CodexAccounts {
         let label = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID).accountLabel
         guard let accountID = credentials.accountID, !accountID.isEmpty else { throw AddFailure.unidentified }
 
-        let known = await primaryAccountIDs().union(index.load().map(\.accountID))
-        if known.contains(accountID) { return .duplicate(label: label) }
+        // Claimed before the first suspension below.
+        if addingAccountIDs.contains(accountID) || isIndexed(accountID) { return .duplicate(label: label) }
+        addingAccountIDs.insert(accountID)
+        defer { addingAccountIDs.remove(accountID) }
+
+        if await primaryAccountIDs().contains(accountID) { return .duplicate(label: label) }
 
         let auth = CodexAuth(accessToken: credentials.accessToken, accountID: accountID)
         guard (try? await fetchUsage(auth)) != nil else { throw AddFailure.usageCheckFailed }
         try Task.checkCancellation()
+        // The index may have changed while suspended (another window, a
+        // relaunch writing the same defaults): check again before writing.
+        if isIndexed(accountID) { return .duplicate(label: label) }
 
-        let entry = CodexAccountEntry(slot: Self.slot(forAccountID: accountID), accountID: accountID, label: label)
-        try await store(for: entry.slot).adopt(credentials)
-        index.save(index.load() + [entry])
+        let slot = try await allocateSlot(for: accountID)
+        defer { reservedSlots.remove(slot) }
+        try Task.checkCancellation()
+
+        try await store(for: slot).adopt(credentials)
+        index.save(index.load() + [CodexAccountEntry(slot: slot, accountID: accountID, label: label)])
         return .added(label: label)
+    }
+
+    private func isIndexed(_ accountID: String) -> Bool {
+        index.load().contains { $0.accountID == accountID }
+    }
+
+    /// First candidate slot no other account owns: not `codex-primary`, not
+    /// in the index, not reserved by a concurrent add, and holding no
+    /// Keychain item under either service (an orphan is not ours to
+    /// overwrite). A Keychain read that cannot answer aborts the add.
+    private func allocateSlot(for accountID: String) async throws -> String {
+        for attempt in 0..<Self.maxSlotAttempts {
+            let candidate = Self.slot(forAccountID: accountID, attempt: attempt)
+            let indexed = Set(index.load().map(\.slot))
+            guard candidate != "codex-primary", !indexed.contains(candidate), !reservedSlots.contains(candidate) else { continue }
+            reservedSlots.insert(candidate)
+            var occupied = false
+            do {
+                for service in Self.services where try await secrets.exists(service: service, account: candidate) {
+                    occupied = true
+                }
+            } catch {
+                reservedSlots.remove(candidate)
+                throw AddFailure.slotCheckFailed
+            }
+            if !occupied { return candidate }
+            reservedSlots.remove(candidate)
+        }
+        throw AddFailure.slotCheckFailed
     }
 
     func store(for slot: String) -> CodexOAuthStore {

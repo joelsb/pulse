@@ -495,6 +495,8 @@ private struct CodexAddAccountButton: View {
                 phase = .idle
             } catch CodexAccounts.AddFailure.unidentified {
                 phase = .failed("Couldn’t identify that account - nothing saved")
+            } catch CodexAccounts.AddFailure.slotCheckFailed {
+                phase = .failed("Couldn’t confirm a free Keychain slot - nothing saved")
             } catch CodexAccounts.AddFailure.usageCheckFailed {
                 phase = .failed("Couldn’t read that account’s usage - nothing saved")
             } catch {

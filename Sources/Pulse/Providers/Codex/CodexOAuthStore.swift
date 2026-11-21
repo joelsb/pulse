@@ -7,6 +7,10 @@ protocol CodexSecretStore: Sendable {
     func read(service: String, account: String) async throws -> String
     func write(service: String, account: String, secret: String) async throws
     func delete(service: String, account: String) async throws
+    /// True when an item exists; throws when that cannot be told (timeout,
+    /// denied), so a caller about to write can fail safe instead of assuming
+    /// the slot is free.
+    func exists(service: String, account: String) async throws -> Bool
 }
 
 /// The production store: `security`-backed reads and writes, base64 at rest.
@@ -28,6 +32,15 @@ struct KeychainCodexSecretStore: CodexSecretStore {
 
     func delete(service: String, account: String) async throws {
         try await writer.delete(service: service, account: account)
+    }
+
+    func exists(service: String, account: String) async throws -> Bool {
+        do {
+            _ = try await reader.readGenericPassword(service: service, account: account)
+            return true
+        } catch KeychainReader.Failure.itemNotFound {
+            return false
+        }
     }
 }
 
