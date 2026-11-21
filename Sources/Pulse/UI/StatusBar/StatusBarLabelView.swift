@@ -15,7 +15,23 @@ struct StatusBarLabelView: View {
     /// Enabled ∩ user-allowed ∩ recently active. Dormant or unconnected
     /// providers keep their tab but never occupy menu bar width.
     private var activeProviders: [ProviderID] {
-        settings.visibleMenuBarProviders.filter { store.record(for: $0).isActiveRecently }
+        Self.menuBarAccounts(selected: settings.visibleMenuBarProviders, store: store, showIdle: settings.showIdleAccounts)
+    }
+
+    /// Selected accounts (Menu icon switch on) that get a block. Normally only
+    /// recently used ones; with "Show idle accounts" (JSB-112) also those whose
+    /// last refresh succeeded with measured limits at zero use. Never an
+    /// account with no data, a failed refresh or a sign-in problem: a block
+    /// must not show a 0 nobody measured.
+    static func menuBarAccounts(selected: [ProviderID], store: UsageStore, showIdle: Bool) -> [ProviderID] {
+        selected.filter { id in
+            let record = store.record(for: id)
+            if record.isActiveRecently { return true }
+            guard showIdle, let snapshot = record.snapshot,
+                  record.lastError == nil, record.notConnectedStrikes == 0
+            else { return false }
+            return snapshot.primary != nil || snapshot.secondary != nil
+        }
     }
 
     var body: some View {

@@ -124,6 +124,15 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    Toggle(isOn: $settings.showIdleAccounts) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Show idle accounts")
+                            Text("Also show accounts whose usage was read and is at zero. Accounts with no data yet, a failed refresh or a sign-in problem stay hidden.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     Text("Which accounts appear in the menu bar is set per account under Accounts.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)

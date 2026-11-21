@@ -125,6 +125,7 @@ final class SettingsStore {
         static let breakdownSources = "breakdownSources"
         static let gaugeDirection = "gaugeDirection"
         static let showPaceMarker = "showPaceMarker"
+        static let showIdleAccounts = "showIdleAccounts"
         static let panelLayout = "panelLayout"
         static let panelMode = "panelMode"
         static let showSystemStats = "showSystemStats"
@@ -172,6 +173,12 @@ final class SettingsStore {
     /// window clock sits, so the bar can be read against elapsed time rather
     /// than in isolation. Off gives a plain bar, and the row shrinks by the
     /// marker's overhang rather than leaving a gap where it was.
+    /// Menu bar: also show selected accounts with measured zero use (JSB-112).
+    /// Off by default, the bar's original behaviour.
+    var showIdleAccounts: Bool {
+        didSet { defaults.set(showIdleAccounts, forKey: Key.showIdleAccounts) }
+    }
+
     var showPaceMarker: Bool {
         didSet { defaults.set(showPaceMarker, forKey: Key.showPaceMarker) }
     }
@@ -332,6 +339,7 @@ final class SettingsStore {
         // because the latter returns false for an absent key, which would
         // silently ship the feature disabled.
         showPaceMarker = (defaults.object(forKey: Key.showPaceMarker) as? Bool) ?? true
+        showIdleAccounts = defaults.bool(forKey: Key.showIdleAccounts)
 
         // Default columns: with two or three providers enabled, one click
         // showing all of them beats three clicks showing one each.
