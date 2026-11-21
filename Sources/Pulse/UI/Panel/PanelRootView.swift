@@ -146,7 +146,7 @@ struct PanelRootView: View {
                     VStack(spacing: Layout.cardGap) {
                         ProviderTabBar(
                             providers: tabs,
-                            names: { environment.descriptor(for: $0).name },
+                            names: { environment.displayName(for: $0) },
                             selection: Binding(
                                 get: { selection },
                                 set: { select($0, keyboard: false) }
@@ -196,7 +196,7 @@ struct PanelRootView: View {
             ForEach(glanceColumns) { provider in
                 VStack(spacing: Layout.cardGap) {
                     ProviderColumnHeader(
-                        name: environment.descriptor(for: provider).name,
+                        name: environment.displayName(for: provider),
                         accent: PulseColor.accent(provider),
                         isActive: provider == selection,
                         select: { withAnimation(Motion.tabPill) { settings.selectedTab = provider } },
@@ -207,7 +207,7 @@ struct PanelRootView: View {
                     )
 
                     ProviderGlanceCard(
-                        descriptor: environment.descriptor(for: provider),
+                        descriptor: environment.displayDescriptor(for: provider),
                         record: store.record(for: provider),
                         settings: settings,
                         openSettings: onOpenSettings
@@ -240,7 +240,7 @@ struct PanelRootView: View {
                 ForEach(columns) { provider in
                     VStack(spacing: Layout.cardGap) {
                         ProviderColumnHeader(
-                            name: environment.descriptor(for: provider).name,
+                            name: environment.displayName(for: provider),
                             accent: PulseColor.accent(provider),
                             isActive: provider == selection,
                             select: { withAnimation(Motion.tabPill) { settings.selectedTab = provider } },
@@ -251,7 +251,7 @@ struct PanelRootView: View {
                         )
 
                         ProviderDetailView(
-                            descriptor: environment.descriptor(for: provider),
+                            descriptor: environment.displayDescriptor(for: provider),
                             record: store.record(for: provider),
                             settings: settings,
                             retry: { environment.scheduler.refreshAll() },
@@ -279,7 +279,7 @@ struct PanelRootView: View {
 
         return ScrollView {
             ProviderDetailView(
-                descriptor: environment.descriptor(for: selection),
+                descriptor: environment.displayDescriptor(for: selection),
                 record: store.record(for: selection),
                 settings: settings,
                 retry: { environment.scheduler.refreshAll() },

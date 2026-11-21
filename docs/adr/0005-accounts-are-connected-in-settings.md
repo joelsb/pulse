@@ -12,6 +12,8 @@ The first row of Claude and Codex shows when Pulse holds its own grant for it ("
 The panel shows exactly the accounts whose Panel switch is on: with none, an empty state leads to Settings > Accounts instead of showing every account; the menu bar icon stays (Pulse mark when no account is in it).
 Disconnect deletes only Pulse's own Keychain grant for a connected account and keeps the row; Remove (after Disconnect) forgets the row. Reconnect refuses a sign-in that lands on a different account.
 
+Joel can give any Claude or Codex account a local display name (Rename… on its row). Names are stored in UserDefaults `accountDisplayNames`, keyed by a fingerprint of provider family plus the account's own identity (Anthropic uuid, ChatGPT account id), never by row, provider id, slot, folder or credential. Each row is bound to the account serving it now (`AppEnvironment.bindAccountNames`), so a name follows its account; when the first row's login changes, it shows its default name again.
+
 ## What forced it
 
 Joel approved layout A of `connected-accounts.html`: one grouped Accounts panel, add/reconnect/disconnect/remove, independent Panel and Menu icon switches, no folder dependency, and he will sign in again (no migration).

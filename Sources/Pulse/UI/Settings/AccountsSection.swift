@@ -22,6 +22,9 @@ struct AccountsSection: View {
     @State private var relaunchNeeded = false
     /// Whether Pulse holds its own grant for the first Claude / Codex account.
     @State private var primaryGrant: [ProviderID: Bool] = [:]
+    /// The row being renamed and its unsaved text.
+    @State private var renaming: ProviderID?
+    @State private var draft = ""
 
     struct Note: Equatable { var text: String; var isError: Bool }
 
@@ -102,13 +105,57 @@ struct AccountsSection: View {
         }
     }
 
+    private func displayName(_ row: AccountRow) -> String {
+        environment.accountNames.name(for: row.id) ?? row.name
+    }
+
     private func rowView(_ row: AccountRow) -> some View {
         AccountRowView(
             row: row,
+            title: displayName(row),
+            editor: renaming == row.id ? AnyView(renameEditor(row)) : nil,
+            accessory: AnyView(renameButton(row)),
             subtitle: subtitle(row),
             panel: panelBinding(row.id),
             menu: menuBinding(row.id)
         ) { actions(row) }
+    }
+
+    private func renameEditor(_ row: AccountRow) -> some View {
+        HStack(spacing: 6) {
+            TextField("Name", text: $draft, prompt: Text(row.name))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 200)
+                .onSubmit { saveName(row) }
+            Button("Cancel") { renaming = nil }
+                .controlSize(.small)
+                .keyboardShortcut(.cancelAction)
+            Button("Save") { saveName(row) }
+                .controlSize(.small)
+                .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    private func saveName(_ row: AccountRow) {
+        environment.accountNames.setName(draft, for: row.id)
+        renaming = nil
+    }
+
+    @ViewBuilder
+    private func renameButton(_ row: AccountRow) -> some View {
+        if AccountRow.family(of: row.id) == .claude || AccountRow.family(of: row.id) == .codex {
+            let known = environment.accountNames.canRename(row.id)
+            Button("Rename…") {
+                draft = environment.accountNames.name(for: row.id) ?? ""
+                renaming = row.id
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(!known || renaming != nil)
+            .help(known
+                ? "A name only Pulse uses, kept for this account on this Mac. Leave it empty to go back to the default."
+                : "Pulse doesn't know which account this is yet. Sign in first.")
+        }
     }
 
     @ViewBuilder
@@ -124,7 +171,7 @@ struct AccountsSection: View {
                     .disabled(busy != nil)
                     .help("Pulse's own sign-in for this account, refreshed by Pulse instead of the tool.")
                 if hasGrant {
-                    Button("Sign out of Pulse…") { confirm = Confirm(account: row.id, kind: .signOutPulse, name: row.name) }
+                    Button("Sign out of Pulse…") { confirm = Confirm(account: row.id, kind: .signOutPulse, name: displayName(row)) }
                         .controlSize(.small)
                         .foregroundStyle(PulseColor.critical)
                 }
@@ -134,11 +181,11 @@ struct AccountsSection: View {
                 .controlSize(.small)
                 .disabled(busy != nil)
             if disconnected {
-                Button("Remove…") { confirm = Confirm(account: row.id, kind: .remove, name: row.name) }
+                Button("Remove…") { confirm = Confirm(account: row.id, kind: .remove, name: displayName(row)) }
                     .controlSize(.small)
                     .foregroundStyle(PulseColor.critical)
             } else {
-                Button("Disconnect…") { confirm = Confirm(account: row.id, kind: .disconnect, name: row.name) }
+                Button("Disconnect…") { confirm = Confirm(account: row.id, kind: .disconnect, name: displayName(row)) }
                     .controlSize(.small)
                     .foregroundStyle(PulseColor.critical)
             }
@@ -210,6 +257,7 @@ struct AccountsSection: View {
         codexEntries = await environment.codexAccounts.entries()
         primaryGrant[.claude] = await environment.claudeAccounts.primaryHasPulseGrant()
         primaryGrant[.codex] = await environment.codexOAuthStore.hasGrant()
+        await environment.bindAccountNames()
     }
 
     private func signInPrimary(_ family: ProviderID) {
@@ -332,8 +380,8 @@ struct AccountsSection: View {
                 return "Nothing to reconnect."
             }
             return matched
-                ? "\(row.name) reconnected."
-                : "The browser signed in as \(outcomeLabel ?? "another account"), not \(row.name). Nothing changed."
+                ? "\(displayName(row)) reconnected."
+                : "The browser signed in as \(outcomeLabel ?? "another account"), not \(displayName(row)). Nothing changed."
         }
     }
 
@@ -398,6 +446,12 @@ struct AccountsSection: View {
 /// independent switches and the row's actions.
 struct AccountRowView<Actions: View>: View {
     let row: AccountRow
+    /// The account's display name (Joel's own name when set).
+    var title: String? = nil
+    /// Shown in place of the title while the row is being renamed.
+    var editor: AnyView? = nil
+    /// Small control after the menu bar code (Rename…).
+    var accessory: AnyView? = nil
     let subtitle: String
     let panel: Binding<Bool>
     let menu: Binding<Bool>
@@ -407,13 +461,18 @@ struct AccountRowView<Actions: View>: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Circle().fill(PulseColor.accent(row.id)).frame(width: 7, height: 7)
-                Text(row.name)
+                if let editor {
+                    editor
+                } else {
+                    Text(title ?? row.name)
+                }
                 Text(row.code)
                     .font(.system(size: 10, weight: .medium).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
                     .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(PulseColor.hairline))
                     .help("Menu bar code")
+                if editor == nil, let accessory { accessory }
             }
             Text(subtitle)
                 .font(.system(size: 11))
@@ -421,8 +480,8 @@ struct AccountRowView<Actions: View>: View {
                 .lineLimit(2)
             HStack(spacing: 12) {
                 if row.kind != .pendingRelaunch {
-                    Toggle("Panel", isOn: panel)
-                    Toggle("Menu icon", isOn: menu)
+                    Toggle("Panel", isOn: panel).fixedSize()
+                    Toggle("Menu icon", isOn: menu).fixedSize()
                 }
                 Spacer(minLength: 4)
                 actions

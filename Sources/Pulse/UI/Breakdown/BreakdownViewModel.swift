@@ -60,7 +60,7 @@ final class BreakdownViewModel {
     /// Whether the source filter is worth showing at all for this provider.
     var showsSourceFilter: Bool { applicableSources.count > 1 }
 
-    func descriptor(for id: ProviderID) -> ProviderDescriptor { environment.descriptor(for: id) }
+    func descriptor(for id: ProviderID) -> ProviderDescriptor { environment.displayDescriptor(for: id) }
 
     /// Key that changes whenever a reload is required (provider/timeframe).
     /// Sort changes only reorder in memory, so they're intentionally excluded.

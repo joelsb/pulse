@@ -11,11 +11,22 @@ struct StatusBarLabelView: View {
     /// NSStatusItem cannot size itself from a hosted SwiftUI view — the
     /// controller sets `statusItem.length` from this measurement.
     var onWidthChange: (CGFloat) -> Void = { _ in }
+    /// The name each account is shown by (Joel's own when set, JSB-112).
+    var name: (ProviderID) -> String = { $0.rawValue }
+    /// The status item's tooltip names the shown accounts; the hosted label
+    /// itself is click-through, so the button carries it.
+    var onTooltipChange: (String) -> Void = { _ in }
 
     /// Enabled ∩ user-allowed ∩ recently active. Dormant or unconnected
     /// providers keep their tab but never occupy menu bar width.
     private var activeProviders: [ProviderID] {
         Self.menuBarAccounts(selected: settings.visibleMenuBarProviders, store: store, showIdle: settings.showIdleAccounts)
+    }
+
+    /// The status item's tooltip: which accounts the blocks belong to, by the
+    /// names Joel gave them (the 3-letter codes stay as they are).
+    static func tooltip(shown: [ProviderID], name: (ProviderID) -> String) -> String {
+        shown.isEmpty ? "Byte Pulse — AI usage" : "Byte Pulse — " + shown.map(name).joined(separator: ", ")
     }
 
     /// Selected accounts (Menu icon switch on) that get a block. Normally only
@@ -51,6 +62,8 @@ struct StatusBarLabelView: View {
                         direction: settings.gaugeDirection,
                         secondaryRow: settings.menuBarSecondaryRow
                     )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(name(id))
                 }
             }
         }
@@ -58,6 +71,9 @@ struct StatusBarLabelView: View {
         .fixedSize()
         .onGeometryChange(for: CGFloat.self, of: \.size.width) { width in
             onWidthChange(width)
+        }
+        .onChange(of: Self.tooltip(shown: settings.menuBarStyle == .icon ? [] : activeProviders, name: name), initial: true) { _, tip in
+            onTooltipChange(tip)
         }
         .allowsHitTesting(false)
     }

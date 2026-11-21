@@ -20,6 +20,10 @@ final class AppEnvironment {
     let codexAccounts: CodexAccounts
     /// Connected Claude accounts (JSB-112), shared with their providers.
     let claudeAccounts: ClaudeAccounts
+    /// Names Joel gives his Claude and Codex accounts (JSB-112).
+    let accountNames = AccountNames()
+    /// The Mac's own Claude Code account uuid, read once at launch.
+    private let primaryClaudeUUID: String?
     /// On-demand per-project/session analytics for the breakdown window. Shares
     /// the provider instances (and their warm caches) with the scheduler.
     let projectUsage: ProjectUsageService
@@ -80,6 +84,7 @@ final class AppEnvironment {
         self.codexOAuthStore = codexOAuthStore
         self.codexAccounts = codexAccounts
         self.claudeAccounts = claudeAccounts
+        self.primaryClaudeUUID = primaryClaudeUUID
         self.providers = providers
         self.scheduler = RefreshScheduler(
             providers: providers,
@@ -90,6 +95,41 @@ final class AppEnvironment {
         self.projectUsage = isDemoData
             ? ProjectUsageService(breakdownProviders: DemoBreakdownProvider.all)
             : ProjectUsageService(providers: providers)
+        accountNames.bind(.claude, accountID: primaryClaudeUUID)
+        Task { await self.bindAccountNames() }
+    }
+
+    /// The name an account is shown by: Joel's own name for it when set,
+    /// else the provider's default ("Claude", "Codex bo…@example.com").
+    func displayName(for id: ProviderID) -> String {
+        accountNames.name(for: id) ?? descriptor(for: id).name
+    }
+
+    func displayDescriptor(for id: ProviderID) -> ProviderDescriptor {
+        let base = descriptor(for: id)
+        return ProviderDescriptor(
+            id: base.id, name: displayName(for: id), shortCode: base.shortCode,
+            appBundleID: base.appBundleID, webURL: base.webURL, setupHint: base.setupHint
+        )
+    }
+
+    /// Binds every Claude and Codex row to the account serving it now, so a
+    /// name follows its account (`AccountNames`). Run at launch and after any
+    /// sign-in change in Settings.
+    func bindAccountNames() async {
+        accountNames.bind(.claude, accountID: primaryClaudeUUID)
+        for entry in await claudeAccounts.entries() {
+            accountNames.bind(.claudeConnected(uuid: entry.uuid), accountID: entry.uuid)
+        }
+        for entry in await codexAccounts.entries() {
+            accountNames.bind(.codexAccount(slot: entry.slot), accountID: entry.accountID)
+        }
+        // The first Codex row is served by Pulse's own grant when it has one,
+        // else by the Codex CLI's login (`CodexProvider.loadCandidates`).
+        let primaryCodex = await codexOAuthStore.hasGrant()
+            ? await codexOAuthStore.storedAccountID()
+            : (try? CodexAuth.load(from: CodexAuth.defaultFileURL))?.accountID
+        accountNames.bind(.codex, accountID: primaryCodex)
     }
 
     func descriptor(for id: ProviderID) -> ProviderDescriptor {

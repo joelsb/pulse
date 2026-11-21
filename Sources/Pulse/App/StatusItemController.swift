@@ -39,7 +39,9 @@ final class StatusItemController {
             store: environment.store,
             settings: environment.settings,
             descriptors: descriptors,
-            onWidthChange: { [weak self] width in self?.updateLength(width) }
+            onWidthChange: { [weak self] width in self?.updateLength(width) },
+            name: { [environment] id in environment.displayName(for: id) },
+            onTooltipChange: { [weak button] tip in button?.toolTip = tip }
         )
         let hostingView = ClickThroughHostingView(rootView: label)
         hostingView.sizingOptions = .intrinsicContentSize
@@ -55,7 +57,6 @@ final class StatusItemController {
         button.target = self
         button.action = #selector(didClickStatusItem)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        button.toolTip = "Byte Pulse — AI usage"
     }
 
     /// The status button derives its width from its own cell (empty here), so
