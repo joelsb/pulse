@@ -457,6 +457,26 @@ struct AccountRowView<Actions: View>: View {
     let menu: Binding<Bool>
     @ViewBuilder var actions: Actions
 
+    @ViewBuilder
+    private var switches: some View {
+        if row.kind != .pendingRelaunch {
+            labeledSwitch("Panel", isOn: panel)
+            labeledSwitch("Menu icon", isOn: menu)
+        }
+    }
+
+    /// A compact switch with its text beside it. NOT `Toggle(...).fixedSize()`:
+    /// inside a grouped Form a toggle lays out as a full-width row, and fixing
+    /// that ideal size made the whole Form wider than the window, cutting off
+    /// every section on both sides.
+    private func labeledSwitch(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 4) {
+            Toggle(title, isOn: isOn).labelsHidden()
+            Text(title).onTapGesture { isOn.wrappedValue.toggle() }
+        }
+        .fixedSize()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -464,7 +484,11 @@ struct AccountRowView<Actions: View>: View {
                 if let editor {
                     editor
                 } else {
+                    // One line, truncated: a long name must never widen the
+                    // Form past the window (it then clips every section).
                     Text(title ?? row.name)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
                 Text(row.code)
                     .font(.system(size: 10, weight: .medium).monospacedDigit())
@@ -478,13 +502,18 @@ struct AccountRowView<Actions: View>: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-            HStack(spacing: 12) {
-                if row.kind != .pendingRelaunch {
-                    Toggle("Panel", isOn: panel).fixedSize()
-                    Toggle("Menu icon", isOn: menu).fixedSize()
+            // Switches and buttons on one line when they fit the window,
+            // otherwise buttons on a second line (never wider than the Form).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    switches
+                    Spacer(minLength: 4)
+                    actions
                 }
-                Spacer(minLength: 4)
-                actions
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 12) { switches }
+                    HStack(spacing: 6) { actions }
+                }
             }
             .toggleStyle(.switch)
             .controlSize(.mini)

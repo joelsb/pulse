@@ -3,6 +3,9 @@ import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
+    /// The Settings window's content width; every row must fit inside it.
+    static let width: CGFloat = 500
+
     let environment: AppEnvironment
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -190,7 +193,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500)
+        .frame(width: Self.width)
     }
 
     /// One "count this source" switch. Every change forces an immediate

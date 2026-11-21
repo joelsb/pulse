@@ -78,6 +78,12 @@ final class StatusItemController {
 
     /// `--show-breakdown` launch argument: opens the breakdown window without a
     /// click, for smoke/screenshot verification.
+    /// Debug hook (`--show-settings` launch argument) to open Settings
+    /// without a click, e.g. for window-geometry verification.
+    func showSettingsForDebug() {
+        settingsController.show()
+    }
+
     func showBreakdownForDebug() {
         showBreakdown()
     }
