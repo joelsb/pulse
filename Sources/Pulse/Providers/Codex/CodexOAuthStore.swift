@@ -1,49 +1,5 @@
 import Foundation
 
-/// Where `CodexOAuthStore` keeps its secrets, keyed like the Keychain by
-/// (service, account). The seam exists so JSB-112's multi-account flow is
-/// tested on an in-memory store instead of this Mac's real Keychain.
-protocol CodexSecretStore: Sendable {
-    func read(service: String, account: String) async throws -> String
-    func write(service: String, account: String, secret: String) async throws
-    func delete(service: String, account: String) async throws
-    /// True when an item exists; throws when that cannot be told (timeout,
-    /// denied), so a caller about to write can fail safe instead of assuming
-    /// the slot is free.
-    func exists(service: String, account: String) async throws -> Bool
-}
-
-/// The production store: `security`-backed reads and writes, base64 at rest.
-struct KeychainCodexSecretStore: CodexSecretStore {
-    var reader = KeychainReader()
-    var writer = KeychainWriter()
-
-    func read(service: String, account: String) async throws -> String {
-        let stored = try await reader.readGenericPassword(service: service, account: account)
-        guard let secret = KeychainWriter.decode(stored) else {
-            throw ProviderFetchError.parsing(description: "CodexOAuthStore: stored item could not be decoded")
-        }
-        return secret
-    }
-
-    func write(service: String, account: String, secret: String) async throws {
-        try await writer.write(service: service, account: account, secret: secret)
-    }
-
-    func delete(service: String, account: String) async throws {
-        try await writer.delete(service: service, account: account)
-    }
-
-    func exists(service: String, account: String) async throws -> Bool {
-        do {
-            _ = try await reader.readGenericPassword(service: service, account: account)
-            return true
-        } catch KeychainReader.Failure.itemNotFound {
-            return false
-        }
-    }
-}
-
 /// Pulse's own Codex OAuth grant, persisted in the Keychain and refreshed by
 /// Pulse on its own schedule - JSB-9, the same shape as `PulseOAuthStore`
 /// (JSB-8), forked rather than shared: see `impl-codex.md` for why a generic
@@ -101,7 +57,7 @@ actor CodexOAuthStore {
     private static let service = "de.byte.pulse.codex-oauth"
     private static let pendingService = "de.byte.pulse.codex-oauth-pending"
 
-    private let secrets: any CodexSecretStore
+    private let secrets: any SecretStore
     private let oauthClient: CodexOAuthClient
     private let refreshOverride: (@Sendable (String) async throws -> CodexOAuthClient.TokenPair)?
     private let verifyOverride: (@Sendable (Credentials) async -> Bool)?
@@ -127,10 +83,10 @@ actor CodexOAuthStore {
         oauthClient: CodexOAuthClient = CodexOAuthClient(),
         refreshOverride: (@Sendable (String) async throws -> CodexOAuthClient.TokenPair)? = nil,
         verifyOverride: (@Sendable (Credentials) async -> Bool)? = nil,
-        secrets: (any CodexSecretStore)? = nil
+        secrets: (any SecretStore)? = nil
     ) {
         self.account = account
-        self.secrets = secrets ?? KeychainCodexSecretStore(reader: keychain, writer: writer)
+        self.secrets = secrets ?? KeychainSecretStore(reader: keychain, writer: writer)
         self.oauthClient = oauthClient
         self.refreshOverride = refreshOverride
         self.verifyOverride = verifyOverride
@@ -291,6 +247,12 @@ actor CodexOAuthStore {
 
     private static func isDeadGrantError(_ error: Error) -> Bool {
         (error as? CodexOAuthClient.TokenEndpointError)?.isPermanentlyDead ?? false
+    }
+
+    /// Settings > Disconnect: deletes this store's own two Keychain items.
+    func forget() async {
+        dead = true
+        await clearGrant()
     }
 
     private func clearGrant() async {

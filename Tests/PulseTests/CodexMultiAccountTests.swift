@@ -34,7 +34,7 @@ private func usage(session: Double, weekly: Double) -> CodexUsageResponse {
 }
 
 /// In-memory stand-in for the Keychain, keyed exactly like it: (service, account).
-actor InMemorySecretStore: CodexSecretStore {
+actor InMemorySecretStore: SecretStore {
     private(set) var items: [String: String] = [:]
     private(set) var writes = 0
 
@@ -271,6 +271,44 @@ struct CodexMultiAccountTests {
         #expect(await fixture.secrets.snapshot().filter { $0.key.hasSuffix("|codex-primary") } == primaryBefore)
     }
 
+    @Test func reconnectDisconnectAndRemoveKeepEveryOtherGrant() async throws {
+        let (fixture, _, accounts, _) = try await seeded()
+        defer { fixture.cleanUp() }
+        _ = try await accounts.add(signIn: { pair(tokenB, accountID: "acct-B", refresh: "RT-B") })
+        let slot = CodexAccounts.slot(forAccountID: "acct-B")
+        let afterAdd = await fixture.secrets.snapshot()
+
+        // Reconnect that lands on another account: refused, nothing written.
+        #expect(try await accounts.reconnect(slot: slot, signIn: { pair(tokenA, accountID: "acct-A") }) == .mismatch(label: "al…@example.com"))
+        #expect(await fixture.secrets.snapshot() == afterAdd)
+
+        // Remove is refused while connected.
+        await #expect(throws: CodexAccounts.AddFailure.stillConnected) { try await accounts.remove(slot: slot) }
+
+        // Disconnect forgets only B's items; the first account's stay.
+        await accounts.disconnect(slot: slot)
+        let afterDisconnect = await fixture.secrets.snapshot()
+        #expect(afterDisconnect.keys.sorted() == ["de.byte.pulse.codex-oauth-pending|codex-primary", "de.byte.pulse.codex-oauth|codex-primary"])
+        #expect(await accounts.entries().first?.disconnected == true)
+        let provider = try #require(CodexAccountProvider.make(entries: await accounts.entries(), accounts: accounts).first)
+        #expect(await provider.probeConnection() == .notConnected(hint: "Disconnected - reconnect it in Settings > Accounts"))
+
+        // Reconnect as B restores it in the same slot.
+        #expect(try await accounts.reconnect(slot: slot, signIn: { pair(tokenB, accountID: "acct-B", refresh: "RT-B2") }) == .reconnected(label: "bo…@example.com"))
+        #expect(await accounts.entries().first?.disconnected == false)
+        #expect(try CodexOAuthStore.decode(await fixture.secrets.read(service: "de.byte.pulse.codex-oauth", account: slot)).refreshToken == "RT-B2")
+
+        await accounts.disconnect(slot: slot)
+        try await accounts.remove(slot: slot)
+        #expect(await accounts.entries().isEmpty)
+    }
+
+    @Test func entrySavedBeforeDisconnectExistedStillDecodes() throws {
+        let legacy = Data(#"[{"slot":"codex-1111111","accountID":"acct-B","label":"bo…@example.com"}]"#.utf8)
+        let entries = try JSONDecoder().decode([CodexAccountEntry].self, from: legacy)
+        #expect(entries == [CodexAccountEntry(slot: "codex-1111111", accountID: "acct-B", label: "bo…@example.com", disconnected: false)])
+    }
+
     /// A different account already owns B's derived slot (a 28-bit digest
     /// collision, planted here): B must land elsewhere and the owner's grant
     /// must stay byte for byte.
@@ -395,7 +433,7 @@ struct CodexMultiAccountTests {
 
 /// Answers reads and writes, but can never say whether an item exists -
 /// the Keychain's "timed out / access denied" case.
-private struct BlindExistsStore: CodexSecretStore {
+private struct BlindExistsStore: SecretStore {
     let inner: InMemorySecretStore
     func read(service: String, account: String) async throws -> String { try await inner.read(service: service, account: account) }
     func write(service: String, account: String, secret: String) async throws { try await inner.write(service: service, account: account, secret: secret) }

@@ -54,6 +54,21 @@ struct ProviderID: RawRepresentable, Codable, Sendable, Hashable, Identifiable, 
         ProviderID(rawValue: "\(claudeAccountPrefix)\(suffix)")
     }
 
+    /// Prefix marking a Claude account connected from Settings > Accounts
+    /// (JSB-112), keyed by its Anthropic account uuid, e.g.
+    /// `claudeConnected.0f1e…`. Not a `~/.claude-*` directory account.
+    static let claudeConnectedPrefix = "claudeConnected."
+
+    static func claudeConnected(uuid: String) -> ProviderID {
+        ProviderID(rawValue: "\(claudeConnectedPrefix)\(uuid)")
+    }
+
+    var isClaudeConnected: Bool { rawValue.hasPrefix(Self.claudeConnectedPrefix) }
+
+    /// An account added in Settings > Accounts (Claude or Codex), as opposed
+    /// to a provider's own local login.
+    var isConnectedAccount: Bool { isClaudeConnected || isCodexAccount }
+
     /// Prefix marking an extra Codex account added from Settings (JSB-112),
     /// e.g. `codexAccount.codex-b0d45d6` for Keychain slot `codex-b0d45d6`.
     static let codexAccountPrefix = "codexAccount."

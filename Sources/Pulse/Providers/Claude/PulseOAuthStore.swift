@@ -40,8 +40,7 @@ actor PulseOAuthStore {
     private static let service = "de.byte.pulse.oauth"
     private static let pendingService = "de.byte.pulse.oauth-pending"
 
-    private let keychain: KeychainReader
-    private let writer: KeychainWriter
+    private let secrets: any SecretStore
     private let oauthClient: ClaudeOAuthClient
     /// Test-only seams for `rotate()`'s two network calls. Both default to the
     /// real `oauthClient` / a real `/oauth/usage` probe; a harness overrides
@@ -115,10 +114,10 @@ actor PulseOAuthStore {
         writer: KeychainWriter = KeychainWriter(),
         oauthClient: ClaudeOAuthClient = ClaudeOAuthClient(),
         refreshOverride: (@Sendable (String) async throws -> ClaudeOAuthClient.TokenPair)? = nil,
-        verifyOverride: (@Sendable (String) async -> Bool)? = nil
+        verifyOverride: (@Sendable (String) async -> Bool)? = nil,
+        secrets: (any SecretStore)? = nil
     ) {
-        self.keychain = keychain
-        self.writer = writer
+        self.secrets = secrets ?? KeychainSecretStore(reader: keychain, writer: writer)
         self.oauthClient = oauthClient
         self.refreshOverride = refreshOverride
         self.verifyOverride = verifyOverride
@@ -131,13 +130,43 @@ actor PulseOAuthStore {
     /// profile so the caller (Settings) can confirm which account it was.
     @discardableResult
     func signIn(openBrowser: @Sendable (URL) -> Void) async throws -> ClaudeOAuthClient.Profile {
+        let authorization = try await authorize(openBrowser: openBrowser)
+        try await adopt(authorization.credentials, accountUUID: authorization.profile.uuid)
+        return authorization.profile
+    }
+
+    /// A finished browser sign-in that has NOT been written anywhere yet
+    /// (JSB-112): the caller checks identity, duplicates and usage first, and
+    /// only then calls `adopt`.
+    struct Authorization: Sendable {
+        var credentials: Credentials
+        var profile: ClaudeOAuthClient.Profile
+    }
+
+    func authorize(openBrowser: @Sendable (URL) -> Void) async throws -> Authorization {
         let (tokens, profile) = try await oauthClient.signIn(openBrowser: openBrowser)
-        let credentials = Credentials(
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
-            expiresAt: tokens.expiresAt,
-            grantedScope: tokens.grantedScope
+        return Authorization(
+            credentials: Credentials(
+                accessToken: tokens.accessToken,
+                refreshToken: tokens.refreshToken,
+                expiresAt: tokens.expiresAt,
+                grantedScope: tokens.grantedScope
+            ),
+            profile: profile
         )
+    }
+
+    /// Deletes Pulse's OWN grant for one account (Settings > Disconnect).
+    /// Only this store's two Keychain services are touched, never Claude
+    /// Code's `Claude Code-credentials` items or any file on disk.
+    func forget(accountUUID: String) async {
+        deadGrants.insert(accountUUID)
+        await clearGrant(accountUUID: accountUUID)
+    }
+
+    /// Writes an already verified grant for `accountUUID`.
+    func adopt(_ credentials: Credentials, accountUUID profileUUID: String) async throws {
+        let profile = ClaudeOAuthClient.Profile(uuid: profileUUID, email: nil)
         // Pending FIRST, same order `rotate` uses, even though a fresh
         // sign-in has no old pair a mis-write could strand: if the SECOND
         // write throws (a `KeychainWriter` verification failure, a timeout),
@@ -161,7 +190,6 @@ actor PulseOAuthStore {
         deadGrants.remove(profile.uuid)
         try await persist(credentials, accountUUID: profile.uuid, service: Self.pendingService)
         try await persist(credentials, accountUUID: profile.uuid, service: Self.service)
-        return profile
     }
 
     // MARK: - Reading a usable pair
@@ -387,8 +415,8 @@ actor PulseOAuthStore {
     /// harmless: `verifies` would refuse it, and `credentials` never reads it
     /// again because `deadGrants` already blocks that account.
     private func clearGrant(accountUUID: String) async {
-        try? await writer.delete(service: Self.service, account: accountUUID)
-        try? await writer.delete(service: Self.pendingService, account: accountUUID)
+        try? await secrets.delete(service: Self.service, account: accountUUID)
+        try? await secrets.delete(service: Self.pendingService, account: accountUUID)
     }
 
     /// Whether `credentials` actually works, proven by a real request rather
@@ -441,27 +469,13 @@ actor PulseOAuthStore {
     }
 
     private func load(service: String, accountUUID: String) async throws -> Credentials {
-        let stored = try await keychain.readGenericPassword(service: service, account: accountUUID)
-        // `KeychainWriter.decode`, not `Self.decode`, is the FIRST step —
-        // everything this store writes goes through `KeychainWriter.write`,
-        // which base64-encodes before it ever reaches `security` (see that
-        // type's doc comment: no length cap, immune to the `-i` parser's
-        // whitespace-splitting). A value that fails to base64-decode is a
-        // legacy item from before this fix, or a truncated/corrupted one —
-        // either way it is treated exactly like "item not found", never a
-        // crash: `read()` already wraps this whole call in `try?`, so this
-        // throw becomes nil there, same as `KeychainReader.Failure.itemNotFound`
-        // would. The next successful write (`-U`) overwrites it cleanly, no
-        // separate delete step needed (verified live).
-        guard let secret = KeychainWriter.decode(stored) else {
-            throw ProviderFetchError.parsing(description: "PulseOAuthStore: stored item could not be decoded")
-        }
+        let secret = try await secrets.read(service: service, account: accountUUID)
         return try Self.decode(secret)
     }
 
     private func persist(_ credentials: Credentials, accountUUID: String, service: String) async throws {
         let secret = try Self.encode(credentials)
-        try await writer.write(service: service, account: accountUUID, secret: secret)
+        try await secrets.write(service: service, account: accountUUID, secret: secret)
     }
 
     // MARK: - Encoding (pure, tested)

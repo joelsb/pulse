@@ -8,6 +8,24 @@ struct CodexAccountEntry: Codable, Equatable, Sendable {
     var slot: String
     var accountID: String
     var label: String?
+    /// Signed out by Disconnect: Pulse's grant is gone, the row stays until
+    /// Remove or Reconnect.
+    var disconnected = false
+
+    init(slot: String, accountID: String, label: String?, disconnected: Bool = false) {
+        self.slot = slot
+        self.accountID = accountID
+        self.label = label
+        self.disconnected = disconnected
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slot = try c.decode(String.self, forKey: .slot)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        disconnected = try c.decodeIfPresent(Bool.self, forKey: .disconnected) ?? false
+    }
 }
 
 /// The persisted list of extra accounts - what makes them survive a relaunch.
@@ -46,10 +64,59 @@ actor CodexAccounts {
         case usageCheckFailed
         /// No free Keychain slot could be confirmed: nothing was written.
         case slotCheckFailed
+        /// Remove is only offered once an account is disconnected.
+        case stillConnected
+    }
+
+    enum ReconnectOutcome: Equatable, Sendable {
+        case reconnected(label: String?)
+        /// The browser signed in as a different account: nothing written.
+        case mismatch(label: String?)
+    }
+
+    static let disconnectedHint = "Disconnected - reconnect it in Settings > Accounts"
+
+    /// Signs the same account in again into its own slot; a sign-in that
+    /// lands on any other account is refused without touching any grant.
+    func reconnect(slot: String, signIn: @Sendable () async throws -> CodexOAuthClient.TokenPair) async throws -> ReconnectOutcome {
+        let tokens = try await signIn()
+        try Task.checkCancellation()
+        let credentials = CodexOAuthStore.credentialsFromSignIn(tokens)
+        let label = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID).accountLabel
+        guard let entry = index.load().first(where: { $0.slot == slot }), credentials.accountID == entry.accountID else {
+            return .mismatch(label: label)
+        }
+        let auth = CodexAuth(accessToken: credentials.accessToken, accountID: entry.accountID)
+        guard (try? await fetchUsage(auth)) != nil else { throw AddFailure.usageCheckFailed }
+        try Task.checkCancellation()
+        try await store(for: slot).adopt(credentials)
+        recent[slot] = nil
+        index.save(index.load().map { $0.slot == slot ? CodexAccountEntry(slot: slot, accountID: $0.accountID, label: label ?? $0.label) : $0 })
+        return .reconnected(label: label)
+    }
+
+    /// Forgets Pulse's own grant for this account (its two Keychain items)
+    /// and keeps the row. Never touches `codex-primary` or the Codex CLI login.
+    func disconnect(slot: String) async {
+        guard slot != "codex-primary" else { return }
+        await store(for: slot).forget()
+        recent[slot] = nil
+        index.save(index.load().map { var e = $0; if e.slot == slot { e.disconnected = true }; return e })
+    }
+
+    func remove(slot: String) throws {
+        let entries = index.load()
+        guard let entry = entries.first(where: { $0.slot == slot }) else { return }
+        guard entry.disconnected else { throw AddFailure.stillConnected }
+        index.save(entries.filter { $0.slot != slot })
+    }
+
+    func isDisconnected(slot: String) -> Bool {
+        index.load().first { $0.slot == slot }?.disconnected ?? true
     }
 
     private let index: CodexAccountIndex
-    private let secrets: any CodexSecretStore
+    private let secrets: any SecretStore
     private let primaryAccountIDs: @Sendable () async -> Set<String>
     private let fetchUsage: @Sendable (CodexAuth) async throws -> CodexUsageResponse
     private let refreshOverride: (@Sendable (String) async throws -> CodexOAuthClient.TokenPair)?
@@ -57,7 +124,7 @@ actor CodexAccounts {
 
     init(
         index: CodexAccountIndex = CodexAccountIndex(),
-        secrets: any CodexSecretStore = KeychainCodexSecretStore(),
+        secrets: any SecretStore = KeychainSecretStore(),
         primaryAccountIDs: @escaping @Sendable () async -> Set<String>,
         fetchUsage: @escaping @Sendable (CodexAuth) async throws -> CodexUsageResponse = { try await CodexUsageAPI(http: HTTPClient()).fetchUsage(auth: $0) },
         refreshOverride: (@Sendable (String) async throws -> CodexOAuthClient.TokenPair)? = nil
@@ -175,11 +242,13 @@ actor CodexAccounts {
     private var recent: [String: (at: Date, response: CodexUsageResponse, label: String?)] = [:]
 
     func hasGrant(slot: String) async -> Bool {
-        await store(for: slot).hasGrant()
+        guard !isDisconnected(slot: slot) else { return false }
+        return await store(for: slot).hasGrant()
     }
 
     /// One extra account's live usage, read with that account's own grant.
     func usage(slot: String, now: Date = .now) async throws -> (response: CodexUsageResponse, label: String?) {
+        guard !isDisconnected(slot: slot) else { throw ProviderFetchError.notLoggedIn(hint: Self.disconnectedHint) }
         if let cached = recent[slot], now.timeIntervalSince(cached.at) < Self.reuseWindow, cached.at <= now {
             return (cached.response, cached.label)
         }
@@ -240,7 +309,8 @@ actor CodexAccountProvider: UsageProvider {
     }
 
     func probeConnection() async -> ProviderConnection {
-        await accounts.hasGrant(slot: slot) ? .available : .notConnected(hint: descriptor.setupHint)
+        if await accounts.isDisconnected(slot: slot) { return .notConnected(hint: CodexAccounts.disconnectedHint) }
+        return await accounts.hasGrant(slot: slot) ? .available : .notConnected(hint: descriptor.setupHint)
     }
 
     func fetch() async throws -> UsageSnapshot {
