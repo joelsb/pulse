@@ -4,5 +4,6 @@ Diagnosed errors: symptom, wrong diagnosis it invites, mechanism, fix, proof, st
 
 | Date | File | Symptom | Status |
 |---|---|---|---|
+| 2026-11-21 | [2026-11-21-settings-form-clipped-by-fixed-size-toggles.md](2026-11-21-settings-form-clipped-by-fixed-size-toggles.md) | Settings window cut off on both sides; Form 744pt wide inside the 500pt window | fixed, seen in isolated real window |
 | 2026-10-23 | [2026-10-23-codex-weekly-window-mislabeled-session.md](2026-10-23-codex-weekly-window-mislabeled-session.md) | Codex prolite weekly-only window mislabeled or rejected; simple view needs empty session ring above weekly bar | proven working |
 | 2026-09-17 | [2026-09-17-menubar-drops-weekly-spend-provider.md](2026-09-17-menubar-drops-weekly-spend-provider.md) | Connected provider (Codex) with real weekly spend disappeared from the menu bar when its 5-hour window read 0% | proven working |

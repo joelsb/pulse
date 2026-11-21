@@ -487,6 +487,11 @@ Errors never modal, never shake. Stale is a color, not an animation.
   (poor-man's scroll-edge-effect) so content doesn't slice against chrome.
 - No scroll indicators unless scrolling (`.scrollIndicators(.automatic)`).
 
+### 5.5b Settings window width
+
+- Every Settings row fits `SettingsView.width` (500pt): a row wider than the window makes the whole grouped Form wider and clips every section on both sides.
+- Never `.fixedSize()` a `Toggle` inside the grouped Form (it pins the full-row width); use a label-hidden switch with its own text, wrap lines with `ViewThatFits`, truncate names to one line. Guarded by `SettingsGeometryTests`.
+
 ### 5.6 Reduce Motion / Transparency
 - Reduce Motion → Motion rule 8 fallbacks.
 - Reduce Transparency / Increase Contrast: `NSGlassEffectView` degrades automatically;
