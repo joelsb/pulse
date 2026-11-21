@@ -15,6 +15,9 @@ final class AppEnvironment {
     let pulseOAuthStore: PulseOAuthStore
     /// Pulse's own Codex OAuth grant (JSB-9), same sharing reason.
     let codexOAuthStore: CodexOAuthStore
+    /// Extra Codex accounts beside `codexOAuthStore`'s (JSB-112), shared with
+    /// `CodexProvider` so an add from Settings shows on the next refresh.
+    let codexAccounts: CodexAccounts
     /// On-demand per-project/session analytics for the breakdown window. Shares
     /// the provider instances (and their warm caches) with the scheduler.
     let projectUsage: ProjectUsageService
@@ -38,10 +41,17 @@ final class AppEnvironment {
         let history = HistoryStore()
         let pulseOAuthStore = PulseOAuthStore()
         let codexOAuthStore = CodexOAuthStore()
+        // An account already shown as the first one - Pulse's own grant or
+        // the Codex CLI's login - must not be added again as an extra.
+        let codexAccounts = CodexAccounts(primaryAccountIDs: { [codexOAuthStore] in
+            let cliAccountID = (try? CodexAuth.load(from: CodexAuth.defaultFileURL))?.accountID
+            return Set([await codexOAuthStore.storedAccountID(), cliAccountID].compactMap { $0 })
+        })
         let providers = ProviderFactory.makeAll(
             captureTitles: settings.useSessionTitles,
             pulseOAuthStore: pulseOAuthStore,
-            codexOAuthStore: codexOAuthStore
+            codexOAuthStore: codexOAuthStore,
+            codexAccounts: codexAccounts
         )
 
         self.settings = settings
@@ -49,6 +59,7 @@ final class AppEnvironment {
         self.history = history
         self.pulseOAuthStore = pulseOAuthStore
         self.codexOAuthStore = codexOAuthStore
+        self.codexAccounts = codexAccounts
         self.providers = providers
         self.scheduler = RefreshScheduler(
             providers: providers,

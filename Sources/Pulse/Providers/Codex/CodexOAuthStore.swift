@@ -1,5 +1,36 @@
 import Foundation
 
+/// Where `CodexOAuthStore` keeps its secrets, keyed like the Keychain by
+/// (service, account). The seam exists so JSB-112's multi-account flow is
+/// tested on an in-memory store instead of this Mac's real Keychain.
+protocol CodexSecretStore: Sendable {
+    func read(service: String, account: String) async throws -> String
+    func write(service: String, account: String, secret: String) async throws
+    func delete(service: String, account: String) async throws
+}
+
+/// The production store: `security`-backed reads and writes, base64 at rest.
+struct KeychainCodexSecretStore: CodexSecretStore {
+    var reader = KeychainReader()
+    var writer = KeychainWriter()
+
+    func read(service: String, account: String) async throws -> String {
+        let stored = try await reader.readGenericPassword(service: service, account: account)
+        guard let secret = KeychainWriter.decode(stored) else {
+            throw ProviderFetchError.parsing(description: "CodexOAuthStore: stored item could not be decoded")
+        }
+        return secret
+    }
+
+    func write(service: String, account: String, secret: String) async throws {
+        try await writer.write(service: service, account: account, secret: secret)
+    }
+
+    func delete(service: String, account: String) async throws {
+        try await writer.delete(service: service, account: account)
+    }
+}
+
 /// Pulse's own Codex OAuth grant, persisted in the Keychain and refreshed by
 /// Pulse on its own schedule - JSB-9, the same shape as `PulseOAuthStore`
 /// (JSB-8), forked rather than shared: see `impl-codex.md` for why a generic
@@ -57,8 +88,7 @@ actor CodexOAuthStore {
     private static let service = "de.byte.pulse.codex-oauth"
     private static let pendingService = "de.byte.pulse.codex-oauth-pending"
 
-    private let keychain: KeychainReader
-    private let writer: KeychainWriter
+    private let secrets: any CodexSecretStore
     private let oauthClient: CodexOAuthClient
     private let refreshOverride: (@Sendable (String) async throws -> CodexOAuthClient.TokenPair)?
     private let verifyOverride: (@Sendable (Credentials) async -> Bool)?
@@ -83,11 +113,11 @@ actor CodexOAuthStore {
         writer: KeychainWriter = KeychainWriter(),
         oauthClient: CodexOAuthClient = CodexOAuthClient(),
         refreshOverride: (@Sendable (String) async throws -> CodexOAuthClient.TokenPair)? = nil,
-        verifyOverride: (@Sendable (Credentials) async -> Bool)? = nil
+        verifyOverride: (@Sendable (Credentials) async -> Bool)? = nil,
+        secrets: (any CodexSecretStore)? = nil
     ) {
         self.account = account
-        self.keychain = keychain
-        self.writer = writer
+        self.secrets = secrets ?? KeychainCodexSecretStore(reader: keychain, writer: writer)
         self.oauthClient = oauthClient
         self.refreshOverride = refreshOverride
         self.verifyOverride = verifyOverride
@@ -101,10 +131,29 @@ actor CodexOAuthStore {
         let credentials = Self.credentials(from: tokens)
         // Same reasoning as `PulseOAuthStore.signIn`: cleared before either
         // write, pending no later than primary. See that type's doc comment.
+        try await adopt(credentials)
+        return credentials
+    }
+
+    /// Stores an already verified grant in this store's slot - JSB-112's
+    /// add-account path, which signs in and checks identity and usage BEFORE
+    /// anything is written. Same pending-then-primary order as `signIn`.
+    func adopt(_ credentials: Credentials) async throws {
         dead = false
         try await persist(credentials, service: Self.pendingService)
         try await persist(credentials, service: Self.service)
-        return credentials
+    }
+
+    /// The stored grant's `chatgpt_account_id`, read without refreshing -
+    /// duplicate detection must not spend a refresh token.
+    func storedAccountID() async -> String? {
+        await read()?.credentials.accountID
+    }
+
+    /// Converts a sign-in token response into the persisted shape (id_token
+    /// dropped, only its account id kept). Exposed for JSB-112's add flow.
+    static func credentialsFromSignIn(_ tokens: CodexOAuthClient.TokenPair) -> Credentials {
+        credentials(from: tokens)
     }
 
     /// The id_token is read here, ONCE, for its `chatgpt_account_id` claim,
@@ -232,8 +281,8 @@ actor CodexOAuthStore {
     }
 
     private func clearGrant() async {
-        try? await writer.delete(service: Self.service, account: account)
-        try? await writer.delete(service: Self.pendingService, account: account)
+        try? await secrets.delete(service: Self.service, account: account)
+        try? await secrets.delete(service: Self.pendingService, account: account)
     }
 
     /// Verification probe is `GET https://chatgpt.com/backend-api/wham/usage`
@@ -268,15 +317,11 @@ actor CodexOAuthStore {
     }
 
     private func load(service: String) async throws -> Credentials {
-        let stored = try await keychain.readGenericPassword(service: service, account: account)
-        guard let secret = KeychainWriter.decode(stored) else {
-            throw ProviderFetchError.parsing(description: "CodexOAuthStore: stored item could not be decoded")
-        }
-        return try Self.decode(secret)
+        try Self.decode(try await secrets.read(service: service, account: account))
     }
 
     private func persist(_ credentials: Credentials, service: String) async throws {
-        try await writer.write(service: service, account: account, secret: try Self.encode(credentials))
+        try await secrets.write(service: service, account: account, secret: try Self.encode(credentials))
     }
 
     // MARK: - Encoding (pure, tested)

@@ -241,7 +241,10 @@ struct SettingsView: View {
                 ClaudeSignInButton(id: id, environment: environment)
             } else if id == .codex {
                 Spacer(minLength: 8)
-                CodexSignInButton(environment: environment)
+                VStack(alignment: .trailing, spacing: 4) {
+                    CodexSignInButton(environment: environment)
+                    CodexAddAccountButton(environment: environment)
+                }
             }
         }
     }
@@ -267,7 +270,9 @@ struct SettingsView: View {
         case .data:
             let plan = record.snapshot?.plan.map { "\($0) · " } ?? ""
             let account = record.snapshot?.accountLabel ?? "Connected"
-            return plan + account
+            // JSB-112: name every extra Codex account beside the first.
+            let extras = record.snapshot?.accountUsages.dropFirst().map(\.label) ?? []
+            return plan + account + (extras.isEmpty ? "" : " + " + extras.joined(separator: ", "))
         case .notConnected:
             return "Not connected — \(descriptor.setupHint)"
         case .error(let error):
@@ -417,9 +422,91 @@ private struct ClaudeSignInButton: View {
     }
 }
 
+/// "Add account" for the Codex row (JSB-112): the same browser sign-in as
+/// `CodexSignInButton`, but the grant goes into a NEW slot beside the first
+/// account instead of replacing it. Identity and usage are checked before
+/// anything is saved; Cancel or an already tracked account changes nothing.
+/// Which account is added is decided by the browser's ChatGPT session - sign
+/// that browser into the second account first.
+private struct CodexAddAccountButton: View {
+    let environment: AppEnvironment
+
+    private enum Phase: Equatable {
+        case idle, working, added(String?), duplicate(String?), failed(String)
+    }
+
+    @State private var phase: Phase = .idle
+    @State private var task: Task<Void, Never>?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            statusLabel
+            if phase == .working {
+                ProgressView().controlSize(.mini)
+                Button("Cancel") { task?.cancel() }
+                    .controlSize(.small)
+            } else {
+                Button("Add account…", action: add)
+                    .controlSize(.small)
+                    .help("Sign in to another ChatGPT account in your browser; the current one stays signed in.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch phase {
+        case .added(let label):
+            Text(label.map { "Added \($0)" } ?? "Account added")
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.ok)
+        case .duplicate(let label):
+            Text(label.map { "\($0) is already tracked" } ?? "Already tracked")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        case .failed(let message):
+            Text(message)
+                .font(.system(size: 10))
+                .foregroundStyle(PulseColor.critical)
+                .lineLimit(1)
+                .frame(maxWidth: 160, alignment: .trailing)
+        case .idle, .working:
+            EmptyView()
+        }
+    }
+
+    private func add() {
+        guard phase != .working else { return }
+        phase = .working
+        task = Task {
+            do {
+                let client = CodexOAuthClient()
+                let outcome = try await environment.codexAccounts.add(signIn: {
+                    try await client.signIn { url in NSWorkspace.shared.open(url) }
+                })
+                switch outcome {
+                case .added(let label):
+                    phase = .added(label)
+                    environment.scheduler.refreshAll()
+                case .duplicate(let label):
+                    phase = .duplicate(label)
+                }
+            } catch is CancellationError {
+                phase = .idle
+            } catch CodexAccounts.AddFailure.unidentified {
+                phase = .failed("Couldn’t identify that account - nothing saved")
+            } catch CodexAccounts.AddFailure.usageCheckFailed {
+                phase = .failed("Couldn’t read that account’s usage - nothing saved")
+            } catch {
+                phase = .failed(CodexSignInButton.message(for: error))
+            }
+        }
+    }
+}
+
 /// "Sign in" for the Codex row (JSB-9), same shape as `ClaudeSignInButton`.
-/// Unlike Claude, Codex has exactly one Pulse-tracked account, so there is no
-/// "which row did it land on" ambiguity to caveat.
+/// This button always (re)signs the FIRST account's fixed slot; extra
+/// accounts come from `CodexAddAccountButton` (JSB-112).
 private struct CodexSignInButton: View {
     let environment: AppEnvironment
 
@@ -487,7 +574,7 @@ private struct CodexSignInButton: View {
     }
 
     /// Never includes token material — same discipline as `ClaudeSignInButton.message`.
-    private static func message(for error: Error) -> String {
+    static func message(for error: Error) -> String {
         if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
         if let tokenEndpointError = error as? CodexOAuthClient.TokenEndpointError {
             switch tokenEndpointError {

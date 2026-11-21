@@ -26,6 +26,16 @@ enum UsageTimeframe: String, CaseIterable, Codable, Sendable {
     }
 }
 
+/// Usage of one account of a multi-account provider.
+struct AccountUsage: Sendable, Equatable, Identifiable {
+    let id: String
+    var label: String
+    var session: LimitWindow?
+    var weekly: LimitWindow?
+    /// Why the numbers are missing, when they are.
+    var note: String?
+}
+
 /// Everything a provider knows about its current usage, in one immutable value.
 /// The UI renders whatever is present and hides what is `nil`/empty, so providers
 /// with different capabilities (e.g. Gemini has quotas but no token costs) share
@@ -50,6 +60,10 @@ struct UsageSnapshot: Sendable, Equatable {
     /// Additional gauges rendered as compact rows (per-model weekly caps,
     /// on-demand spend, Gemini per-model quotas, ...).
     var extraWindows: [LimitWindow] = []
+
+    /// One labeled session + weekly row per account when a provider tracks
+    /// more than one (JSB-112, Codex). Empty for a single-account provider.
+    var accountUsages: [AccountUsage] = []
 
     /// When the limits gauges (`primary`/`secondary`/`tertiary`/`extraWindows`)
     /// were actually captured by a successful fetch. Distinct from

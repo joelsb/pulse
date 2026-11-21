@@ -23,6 +23,9 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
     /// source Pulse itself refreshes, so it never silently goes stale the way
     /// a harness-owned copy does the moment that harness stops running.
     private let codexOAuthStore: CodexOAuthStore
+    /// JSB-112: extra accounts beside the one above, each with its own grant.
+    private let accounts: CodexAccounts?
+    private let usageFetcher: (@Sendable (CodexAuth) async throws -> CodexUsageResponse)?
 
     init(
         http: HTTPClient = HTTPClient(),
@@ -30,8 +33,12 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
         jcodeStore: JcodeOpenAICredentialsStore = JcodeOpenAICredentialsStore(),
         piAuthFileURL: URL = AppPaths.home.appendingPathComponent(".pi/agent/auth.json"),
         codexOAuthStore: CodexOAuthStore = CodexOAuthStore(),
-        parser: CodexSessionParser = CodexSessionParser()
+        parser: CodexSessionParser = CodexSessionParser(),
+        accounts: CodexAccounts? = nil,
+        usageFetcher: (@Sendable (CodexAuth) async throws -> CodexUsageResponse)? = nil
     ) {
+        self.accounts = accounts
+        self.usageFetcher = usageFetcher
         self.api = CodexUsageAPI(http: http)
         self.authFileURL = authFileURL
         self.jcodeStore = jcodeStore
@@ -110,7 +117,11 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
     private func fetchUsage(candidates: [Candidate]) async -> (response: CodexUsageResponse?, winner: CodexAuth?, winnerSource: CredentialSource?, error: ProviderFetchError?) {
         guard let first = candidates.first else { return (nil, nil, nil, nil) }
         do {
-            let response = try await api.fetchUsage(auth: first.auth)
+            let response = if let usageFetcher {
+                try await usageFetcher(first.auth)
+            } else {
+                try await api.fetchUsage(auth: first.auth)
+            }
             return (response, first.auth, first.source, nil)
         } catch ProviderFetchError.unauthorized {
             let remaining = Array(candidates.dropFirst())
@@ -163,6 +174,20 @@ actor CodexProvider: UsageProvider, ProjectBreakdownProviding {
             }
         } else if let fallback = report.newestRateLimits {
             applyFallbackLimits(fallback, to: &snapshot, now: now)
+        }
+
+        if let accounts {
+            let extras = await accounts.usages(now: now)
+            if !extras.isEmpty {
+                let first = AccountUsage(
+                    id: "codex-primary",
+                    label: auth.accountLabel ?? "Account 1",
+                    session: response == nil ? nil : snapshot.primary,
+                    weekly: response == nil ? nil : snapshot.secondary,
+                    note: response == nil ? (limitsError?.userMessage ?? "Usage unavailable") : nil
+                )
+                snapshot.accountUsages = [first] + extras
+            }
         }
 
         if snapshot.primary == nil && snapshot.secondary == nil && snapshot.tokens == nil {

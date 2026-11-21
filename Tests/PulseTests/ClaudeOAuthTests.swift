@@ -297,4 +297,24 @@ struct LoopbackCallbackListenerTests {
             #expect(error == .deniedByProvider(description: "access_denied"))
         }
     }
+
+    // JSB-112: Cancel in Settings must end the wait (and free the port) at
+    // once, not after the 5-minute timeout.
+    @Test func cancellingTheWaitThrowsCancellationAndFreesThePort() async throws {
+        let port: UInt16 = 53_813
+        let listener = try LoopbackCallbackListener(port: port)
+        let wait = Task { try await listener.waitForCallback(timeout: 3) }
+        try await Task.sleep(for: .milliseconds(200))
+        let started = Date()
+        wait.cancel()
+        await #expect(throws: CancellationError.self) { try await wait.value }
+        #expect(Date().timeIntervalSince(started) < 1)
+        // Port is free again: a second listener can bind it.
+        try await Task.sleep(for: .milliseconds(200))
+        let again = try LoopbackCallbackListener(port: port)
+        async let second = again.waitForCallback(timeout: 2)
+        try await Task.sleep(for: .milliseconds(200))
+        _ = try await URLSession.shared.data(from: URL(string: "http://localhost:\(port)/callback?code=c&state=s")!)
+        #expect(try await second.code == "c")
+    }
 }

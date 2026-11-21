@@ -13,10 +13,13 @@ enum ProviderFactory {
     /// - Parameter codexOAuthStore: JSB-9's Codex equivalent — shared with
     ///   Settings the same way, so a Codex sign-in updates the same object
     ///   `CodexProvider` reads from.
+    /// - Parameter codexAccounts: JSB-112's extra Codex accounts, shared with
+    ///   Settings for the same reason.
     static func makeAll(
         captureTitles: Bool = true,
         pulseOAuthStore: PulseOAuthStore = PulseOAuthStore(),
-        codexOAuthStore: CodexOAuthStore = CodexOAuthStore()
+        codexOAuthStore: CodexOAuthStore = CodexOAuthStore(),
+        codexAccounts: CodexAccounts? = nil
     ) -> [any UsageProvider] {
         // Claude accounts are discovered from ~/.claude* at launch, so the
         // registry has to learn about them before anything reads allCases
@@ -26,7 +29,7 @@ enum ProviderFactory {
 
         return accounts.map { ClaudeProvider(account: $0, pulseOAuthStore: pulseOAuthStore, captureTitles: captureTitles) }
             + [
-                CodexProvider(codexOAuthStore: codexOAuthStore),
+                CodexProvider(codexOAuthStore: codexOAuthStore, accounts: codexAccounts),
                 CursorProvider(),
                 CopilotProvider(),
                 GeminiProvider(),

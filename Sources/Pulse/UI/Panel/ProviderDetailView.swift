@@ -44,6 +44,9 @@ struct ProviderDetailView: View {
                     showPaceMarker: settings.showPaceMarker
                 )
             }
+            if !snapshot.accountUsages.isEmpty {
+                AccountUsageCard(accounts: snapshot.accountUsages, direction: settings.gaugeDirection)
+            }
             if let tertiary = snapshot.tertiary {
                 LimitGaugeCard(
                     window: tertiary,

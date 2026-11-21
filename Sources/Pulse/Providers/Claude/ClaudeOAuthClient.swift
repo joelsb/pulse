@@ -419,7 +419,17 @@ final class LoopbackCallbackListener: @unchecked Sendable {
     /// `timeout` — 5 minutes is generous for "read the consent screen and
     /// click Allow" without leaving a listener bound indefinitely if the tab
     /// is abandoned.
+    /// Cancelling the calling task ends the wait at once with
+    /// `CancellationError` and releases the port (Settings' Cancel button).
     func waitForCallback(timeout: TimeInterval = 300) async throws -> Callback {
+        try await withTaskCancellationHandler {
+            try await wait(timeout: timeout)
+        } onCancel: { [box] in
+            box.resolve(.failure(CancellationError()))
+        }
+    }
+
+    private func wait(timeout: TimeInterval) async throws -> Callback {
         try await withCheckedThrowingContinuation { continuation in
             box.onResolve = { result in
                 self.listener.cancel()
@@ -497,15 +507,32 @@ final class LoopbackCallbackListener: @unchecked Sendable {
     private final class ResolveBox: @unchecked Sendable {
         private let lock = NSLock()
         private var done = false
-        var onResolve: ((Result<Callback, Error>) -> Void)?
+        /// A result that arrived before `onResolve` was set (a cancel racing
+        /// the start of the wait) - delivered as soon as it is set.
+        private var early: Result<Callback, Error>?
+        private var handler: ((Result<Callback, Error>) -> Void)?
+
+        var onResolve: ((Result<Callback, Error>) -> Void)? {
+            get { lock.withLock { handler } }
+            set {
+                lock.lock()
+                handler = newValue
+                let pending = early
+                early = nil
+                lock.unlock()
+                if let pending { newValue?(pending) }
+            }
+        }
 
         func resolve(_ result: Result<Callback, Error>) {
             lock.lock()
             let shouldRun = !done
             if shouldRun { done = true }
+            let run = handler
+            if shouldRun, run == nil { early = result }
             lock.unlock()
-            guard shouldRun else { return }
-            onResolve?(result)
+            guard shouldRun, let run else { return }
+            run(result)
         }
     }
 }
