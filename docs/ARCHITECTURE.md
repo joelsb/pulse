@@ -38,7 +38,7 @@ failures degrade to a stale badge instead of blanking the panel.
 
 | Provider | Limits source | Tokens/cost source | Auth |
 |---|---|---|---|
-| Claude | `api.anthropic.com/api/oauth/usage` (flat windows + structured `limits` array; Fable only in the latter) | `~/.claude/projects/**/*.jsonl`, plus the harnesses billing the same account — `~/.jcode/sessions/session_*.json` and `~/.pi/agent/sessions/**/*.jsonl` — + pricing table | Keychain "Claude Code-credentials" via `/usr/bin/security` (stable ACL grant), file fallback |
+| Claude | `api.anthropic.com/api/oauth/usage` (flat windows + structured `limits` array; Fable only in the latter) | `~/.claude/projects/**/*.jsonl`, plus the harnesses billing the same account — `~/.jcode/sessions/session_*.json` and `~/.pi/agent/sessions/**/*.jsonl` — + pricing table | Keychain "Claude Code-credentials" via `/usr/bin/security` (stable ACL grant), file fallback; further accounts connected in Settings > Accounts as Pulse grants per account uuid (`ClaudeConnectedProvider`, ADR-0005) |
 | Codex | `chatgpt.com/backend-api/wham/usage` (fallback: newest session JSONL `rate_limits`) | `~/.codex/sessions/**` cumulative `token_count` deltas | Pulse's Keychain grant `codex-primary`, then `~/.codex/auth.json`, jcode, pi; extra accounts in their own Keychain slots, listed in UserDefaults `codexExtraAccounts`; each is its own `CodexAccountProvider` (`codexAccount.<slot>`, tab + menu bar block `CD2`, `CD3`...) and a row in the Codex tab's Accounts card (ADR-0003, ADR-0004) |
 | Cursor | `cursor.com` usage + dashboard APIs | `get-aggregated-usage-events` / `get-filtered-usage-events` | JWT from `state.vscdb` (read-only, immutable mode) → `WorkosCursorSessionToken` cookie |
 | Gemini | `cloudcode-pa.googleapis.com` `loadCodeAssist` + `retrieveUserQuota` | n/a (quota-only tab) | `~/.gemini/oauth_creds.json`, in-memory refresh only |
@@ -71,7 +71,7 @@ cannot be resolved (offline, expired token, signed out) contributes to **no**
 tab: dropped usage is visible and recoverable, misattributed usage is neither.
 Two config dirs holding the same account (this machine has `~/.claude` and
 `~/.claude-joeld`, both joel@) would otherwise both claim the same harness
-sessions, so only the first keeps the claim. pi has no sub-agents (no session-level parent;
+sessions, so only the first keeps the claim. Since ADR-0005 the app reads only `~/.claude` at launch (`ClaudeAccount.primary()`); further Claude accounts are connected in Settings > Accounts and carry limits only. pi has no sub-agents (no session-level parent;
 a record's `parentId` is the conversation DAG), so the token card's sub-agent
 rows are gated per window and stay hidden for a pi-only account.
 

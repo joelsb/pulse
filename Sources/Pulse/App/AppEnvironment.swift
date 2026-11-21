@@ -18,6 +18,8 @@ final class AppEnvironment {
     /// Extra Codex accounts beside `codexOAuthStore`'s (JSB-112), shared with
     /// `CodexProvider` so an add from Settings shows on the next refresh.
     let codexAccounts: CodexAccounts
+    /// Connected Claude accounts (JSB-112), shared with their providers.
+    let claudeAccounts: ClaudeAccounts
     /// On-demand per-project/session analytics for the breakdown window. Shares
     /// the provider instances (and their warm caches) with the scheduler.
     let projectUsage: ProjectUsageService
@@ -34,10 +36,13 @@ final class AppEnvironment {
         // which persisted ids are still valid, so an empty registry at that
         // moment silently discards every discovered account and rewrites
         // UserDefaults without them.
-        // Same for extra Codex accounts (JSB-112), read from their index.
+        // JSB-112: accounts come from Settings > Accounts (their indexes),
+        // never from `~/.claude-*` directories.
         let codexAccountEntries = CodexAccountIndex().load()
+        let claudeAccountEntries = ClaudeAccountIndex().load()
+        let primaryClaude = ClaudeAccount.primary()
         ProviderRegistry.shared.register(
-            claudeAccounts: ClaudeAccount.discover().map(\.id),
+            claudeAccounts: [primaryClaude.id] + claudeAccountEntries.map { .claudeConnected(uuid: $0.uuid) },
             codexAccounts: codexAccountEntries.map { .codexAccount(slot: $0.slot) }
         )
 
@@ -52,12 +57,20 @@ final class AppEnvironment {
             let cliAccountID = (try? CodexAuth.load(from: CodexAuth.defaultFileURL))?.accountID
             return Set([await codexOAuthStore.storedAccountID(), cliAccountID].compactMap { $0 })
         })
+        // The Mac's own Claude Code login is the first Claude account; adding
+        // it again would be a duplicate.
+        let primaryClaudeUUID = primaryClaude.accountUUID
+        let claudeAccounts = ClaudeAccounts(store: pulseOAuthStore, primaryAccountUUIDs: {
+            Set([primaryClaudeUUID].compactMap { $0 })
+        })
         let providers = ProviderFactory.makeAll(
             captureTitles: settings.useSessionTitles,
             pulseOAuthStore: pulseOAuthStore,
             codexOAuthStore: codexOAuthStore,
             codexAccounts: codexAccounts,
-            codexAccountEntries: codexAccountEntries
+            codexAccountEntries: codexAccountEntries,
+            claudeAccounts: claudeAccounts,
+            claudeAccountEntries: claudeAccountEntries
         )
 
         self.settings = settings
@@ -66,6 +79,7 @@ final class AppEnvironment {
         self.pulseOAuthStore = pulseOAuthStore
         self.codexOAuthStore = codexOAuthStore
         self.codexAccounts = codexAccounts
+        self.claudeAccounts = claudeAccounts
         self.providers = providers
         self.scheduler = RefreshScheduler(
             providers: providers,

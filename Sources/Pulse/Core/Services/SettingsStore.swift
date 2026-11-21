@@ -291,6 +291,7 @@ final class SettingsStore {
     ///   they never have to mutate the process-wide one.
     init(defaults: UserDefaults = .standard, providers: [ProviderID] = ProviderID.allCases) {
         self.defaults = defaults
+        self.providerOrder = providers
 
         let storedInterval = defaults.double(forKey: Key.refreshInterval)
         refreshInterval = storedInterval >= 30 ? storedInterval : 60
@@ -407,9 +408,18 @@ final class SettingsStore {
         publishUsageSources()
     }
 
-    /// Providers actually shown in the bar: enabled ∩ menuBarProviders, canonical order.
+    /// Every provider this launch knows, in display order.
+    private let providerOrder: [ProviderID]
+
+    /// Providers shown in the menu bar icon, canonical order. Independent of
+    /// the panel (JSB-112): an account can be in the icon without a tab.
     var visibleMenuBarProviders: [ProviderID] {
-        enabledProviders.filter(menuBarProviders.contains)
+        providerOrder.filter(menuBarProviders.contains)
+    }
+
+    /// Providers that must keep refreshing: shown in the panel OR the icon.
+    var refreshedProviders: [ProviderID] {
+        providerOrder.filter { enabledProviders.contains($0) || menuBarProviders.contains($0) }
     }
 
     // MARK: - Launch at login

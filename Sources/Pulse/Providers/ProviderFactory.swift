@@ -23,18 +23,26 @@ enum ProviderFactory {
         codexOAuthStore: CodexOAuthStore = CodexOAuthStore(),
         codexAccounts: CodexAccounts? = nil,
         codexAccountEntries: [CodexAccountEntry] = [],
+        claudeAccounts: ClaudeAccounts? = nil,
+        claudeAccountEntries: [ClaudeAccountEntry] = [],
         registry: ProviderRegistry = .shared
     ) -> [any UsageProvider] {
         // Claude accounts are discovered from ~/.claude* at launch, so the
         // registry has to learn about them before anything reads allCases
         // (tab order, settings, menu bar).
-        let accounts = ClaudeAccount.discover()
+        // JSB-112: only the Mac's own Claude login is read from disk; every
+        // further Claude account is one Joel connected in Settings > Accounts.
+        let accounts = [ClaudeAccount.primary()]
+        let claudeProviders = claudeAccounts.map {
+            ClaudeConnectedProvider.make(entries: claudeAccountEntries, accounts: $0)
+        } ?? []
         let codexProviders = codexAccounts.map {
             CodexAccountProvider.make(entries: codexAccountEntries, accounts: $0)
         } ?? []
-        registry.register(claudeAccounts: accounts.map(\.id), codexAccounts: codexProviders.map(\.id))
+        registry.register(claudeAccounts: accounts.map(\.id) + claudeProviders.map(\.id), codexAccounts: codexProviders.map(\.id))
 
         return accounts.map { ClaudeProvider(account: $0, pulseOAuthStore: pulseOAuthStore, captureTitles: captureTitles) }
+            + claudeProviders
             + [
                 CodexProvider(codexOAuthStore: codexOAuthStore, accounts: codexAccounts),
             ]

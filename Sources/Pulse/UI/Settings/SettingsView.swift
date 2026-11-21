@@ -56,19 +56,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section {
-                ForEach(ProviderID.allCases) { id in
-                    providerRow(id, subtitle: claudeAccountSubtitle(id) ?? codexAccountSubtitle(id))
-                }
-            } header: {
-                Text("Providers")
-            } footer: {
-                if !discoveredClaudeAccounts.isEmpty {
-                    Text("Extra Claude accounts are found by scanning your home folder for `.claude-*` directories, and start switched off. Create one with `CLAUDE_CONFIG_DIR=~/.claude-work claude`, then restart Pulse.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-            }
+            AccountsSection(environment: environment)
 
             Section("Panel") {
                 Picker("Show", selection: $settings.panelMode) {
@@ -136,13 +124,9 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    ForEach(ProviderID.allCases) { id in
-                        Toggle(
-                            environment.descriptor(for: id).name,
-                            isOn: menuBarBinding(for: id)
-                        )
-                        .disabled(!settings.enabledProviders.contains(id))
-                    }
+                    Text("Which accounts appear in the menu bar is set per account under Accounts.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -197,7 +181,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
+        .frame(width: 500)
     }
 
     /// One "count this source" switch. Every change forces an immediate
@@ -220,103 +204,6 @@ struct SettingsView: View {
         }
     }
 
-    private func providerRow(_ id: ProviderID, subtitle: String? = nil) -> some View {
-        let descriptor = environment.descriptor(for: id)
-        let record = store.record(for: id)
-
-        return HStack {
-            Toggle(isOn: enabledBinding(for: id)) {
-                HStack(spacing: 6) {
-                    Circle().fill(PulseColor.accent(id)).frame(width: 7, height: 7)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(descriptor.name)
-                        Text(subtitle ?? statusLine(record: record, descriptor: descriptor))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if id.isClaudeAccount {
-                Spacer(minLength: 8)
-                ClaudeSignInButton(id: id, environment: environment)
-            } else if id == .codex {
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 4) {
-                    CodexSignInButton(environment: environment)
-                    CodexAddAccountButton(environment: environment)
-                }
-            }
-        }
-    }
-
-    /// Secondary Claude accounts, i.e. everything discovered under `~/.claude-*`.
-    private var discoveredClaudeAccounts: [ProviderID] {
-        ProviderID.allCases.filter { $0.isClaudeAccount && $0 != .claude }
-    }
-
-    /// For a discovered account, lead with the directory it reads: with several
-    /// "Claude Something" rows, the config dir is the only thing that tells
-    /// them apart. nil for built-ins, which keep their normal status line.
-    private func claudeAccountSubtitle(_ id: ProviderID) -> String? {
-        guard id.isClaudeAccount, id != .claude else { return nil }
-        let record = store.record(for: id)
-        let descriptor = environment.descriptor(for: id)
-        let suffix = id.rawValue.dropFirst(ProviderID.claudeAccountPrefix.count)
-        return "~/.claude-\(suffix) · \(statusLine(record: record, descriptor: descriptor))"
-    }
-
-    /// An extra Codex account (JSB-112) says it is one, ahead of its status.
-    private func codexAccountSubtitle(_ id: ProviderID) -> String? {
-        guard id.isCodexAccount else { return nil }
-        let record = store.record(for: id)
-        return "Added Codex account · \(statusLine(record: record, descriptor: environment.descriptor(for: id)))"
-    }
-
-    private func statusLine(record: ProviderRecord, descriptor: ProviderDescriptor) -> String {
-        switch record.displayState {
-        case .data:
-            let plan = record.snapshot?.plan.map { "\($0) · " } ?? ""
-            let account = record.snapshot?.accountLabel ?? "Connected"
-            // JSB-112: name every extra Codex account beside the first.
-            let extras = record.snapshot?.accountUsages.dropFirst().map(\.label) ?? []
-            return plan + account + (extras.isEmpty ? "" : " + " + extras.joined(separator: ", "))
-        case .notConnected:
-            return "Not connected — \(descriptor.setupHint)"
-        case .error(let error):
-            return error.userMessage
-        case .loading:
-            return "Checking…"
-        }
-    }
-
-    private func enabledBinding(for id: ProviderID) -> Binding<Bool> {
-        Binding(
-            get: { settings.enabledProviders.contains(id) },
-            set: { enabled in
-                if enabled {
-                    settings.enabledProviders = ProviderID.allCases.filter {
-                        settings.enabledProviders.contains($0) || $0 == id
-                    }
-                } else {
-                    settings.enabledProviders.removeAll { $0 == id }
-                }
-                environment.scheduler.syncLoops()
-            }
-        )
-    }
-
-    private func menuBarBinding(for id: ProviderID) -> Binding<Bool> {
-        Binding(
-            get: { settings.menuBarProviders.contains(id) },
-            set: { visible in
-                if visible {
-                    settings.menuBarProviders.insert(id)
-                } else {
-                    settings.menuBarProviders.remove(id)
-                }
-            }
-        )
-    }
 }
 
 /// "Sign in" for a Claude account row (JSB-8): mints Pulse's own OAuth grant
@@ -329,7 +216,7 @@ struct SettingsView: View {
 /// installed app can. The grant lands wherever `/oauth/profile` says it
 /// landed; if that isn't the row you clicked, sign in again from THAT
 /// account's own browser session.
-private struct ClaudeSignInButton: View {
+struct ClaudeSignInButton: View {
     let id: ProviderID
     let environment: AppEnvironment
 
@@ -397,7 +284,7 @@ private struct ClaudeSignInButton: View {
     /// Never includes token material — there is none in any error this flow
     /// can throw (see `ClaudeOAuthClient`/`PulseOAuthStore`: every failure
     /// path is a status code, a timeout, or a parse failure).
-    private static func message(for error: Error) -> String {
+    static func message(for error: Error) -> String {
         if let fetchError = error as? ProviderFetchError { return fetchError.userMessage }
         if let tokenEndpointError = error as? ClaudeOAuthClient.TokenEndpointError {
             switch tokenEndpointError {
@@ -429,110 +316,10 @@ private struct ClaudeSignInButton: View {
     }
 }
 
-/// "Add account" for the Codex row (JSB-112): the same browser sign-in as
-/// `CodexSignInButton`, but the grant goes into a NEW slot beside the first
-/// account instead of replacing it. Identity and usage are checked before
-/// anything is saved; Cancel or an already tracked account changes nothing.
-/// Which account is added is decided by the browser's ChatGPT session - sign
-/// that browser into the second account first.
-private struct CodexAddAccountButton: View {
-    let environment: AppEnvironment
-
-    private enum Phase: Equatable {
-        case idle, working, added(String?), duplicate(String?), failed(String)
-    }
-
-    @State private var phase: Phase = .idle
-    @State private var task: Task<Void, Never>?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            statusLabel
-            if phase == .working {
-                ProgressView().controlSize(.mini)
-                Button("Cancel") { task?.cancel() }
-                    .controlSize(.small)
-            } else {
-                Button("Add account…", action: add)
-                    .controlSize(.small)
-                    .help("Sign in to another ChatGPT account in your browser; the current one stays signed in.")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var statusLabel: some View {
-        switch phase {
-        case .added(let label):
-            // Like a new Claude account directory, a new Codex account gets
-            // its own tab and menu bar slot at the next launch.
-            Text((label.map { "Added \($0)" } ?? "Account added") + " - relaunch for its menu bar slot")
-                .font(.system(size: 10))
-                .foregroundStyle(PulseColor.ok)
-                .lineLimit(2)
-                .frame(maxWidth: 170, alignment: .trailing)
-            Button("Relaunch", action: Self.relaunch)
-                .controlSize(.small)
-        case .duplicate(let label):
-            Text(label.map { "\($0) is already tracked" } ?? "Already tracked")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-        case .failed(let message):
-            Text(message)
-                .font(.system(size: 10))
-                .foregroundStyle(PulseColor.critical)
-                .lineLimit(1)
-                .frame(maxWidth: 160, alignment: .trailing)
-        case .idle, .working:
-            EmptyView()
-        }
-    }
-
-    /// Starts a fresh instance of this app, then quits this one.
-    private static func relaunch() {
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-            guard error == nil else { return }
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        }
-    }
-
-    private func add() {
-        guard phase != .working else { return }
-        phase = .working
-        task = Task {
-            do {
-                let client = CodexOAuthClient()
-                let outcome = try await environment.codexAccounts.add(signIn: {
-                    try await client.signIn { url in NSWorkspace.shared.open(url) }
-                })
-                switch outcome {
-                case .added(let label):
-                    phase = .added(label)
-                    environment.scheduler.refreshAll()
-                case .duplicate(let label):
-                    phase = .duplicate(label)
-                }
-            } catch is CancellationError {
-                phase = .idle
-            } catch CodexAccounts.AddFailure.unidentified {
-                phase = .failed("Couldn’t identify that account - nothing saved")
-            } catch CodexAccounts.AddFailure.slotCheckFailed {
-                phase = .failed("Couldn’t confirm a free Keychain slot - nothing saved")
-            } catch CodexAccounts.AddFailure.usageCheckFailed {
-                phase = .failed("Couldn’t read that account’s usage - nothing saved")
-            } catch {
-                phase = .failed(CodexSignInButton.message(for: error))
-            }
-        }
-    }
-}
-
 /// "Sign in" for the Codex row (JSB-9), same shape as `ClaudeSignInButton`.
 /// This button always (re)signs the FIRST account's fixed slot; extra
 /// accounts come from `CodexAddAccountButton` (JSB-112).
-private struct CodexSignInButton: View {
+struct CodexSignInButton: View {
     let environment: AppEnvironment
 
     private enum Phase: Equatable {

@@ -166,3 +166,84 @@ struct ClaudeConnectedAccountsTests {
         #expect(try await provider.fetch().primary?.utilization == 40)
     }
 }
+
+@Suite("Accounts panel and menu icon switches are independent (JSB-112)")
+@MainActor
+struct AccountVisibilityTests {
+    @Test func menuIconShowsAnAccountHiddenFromThePanelAndBothKeepRefreshing() throws {
+        let suite = "pulse-tests-visibility-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        let settings = SettingsStore(defaults: defaults, providers: [.claude, b, .codex])
+
+        settings.enabledProviders = [.claude]      // Panel: only Claude has a tab
+        settings.menuBarProviders = [b, .codex]    // Menu icon: B and Codex
+
+        #expect(settings.visibleMenuBarProviders == [b, .codex])
+        #expect(settings.refreshedProviders == [.claude, b, .codex])
+
+        settings.menuBarProviders = []
+        #expect(settings.visibleMenuBarProviders.isEmpty)
+        #expect(settings.refreshedProviders == [.claude])
+    }
+}
+
+@Suite("Accounts launch wiring (JSB-112)")
+struct AccountsLaunchWiringTests {
+    /// Accounts come from Settings > Accounts, never from `~/.claude-*`
+    /// directories: even on a Mac that has some, only the Mac's own Claude
+    /// login plus the connected accounts are registered.
+    @Test func factoryRegistersConnectedClaudeAccountsAndNoDirectoryAccounts() async throws {
+        let fixture = ClaudeFixture()
+        defer { fixture.cleanUp() }
+        let accounts = fixture.accounts()
+        let entries = [ClaudeAccountEntry(uuid: "uuid-b", label: "bo…@example.com")]
+        let registry = ProviderRegistry()
+
+        let providers = ProviderFactory.makeAll(claudeAccounts: accounts, claudeAccountEntries: entries, registry: registry)
+
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        #expect(Array(providers.map(\.id).prefix(3)) == [.claude, b, .codex])
+        #expect(registry.all.prefix(3) == [.claude, b, .codex])
+        #expect(!registry.all.contains { $0.rawValue.hasPrefix(ProviderID.claudeAccountPrefix) })
+        #expect(providers.first { $0.id == b }?.descriptor.shortCode == "CL2")
+    }
+}
+
+@Suite("Settings > Accounts rows (JSB-112)")
+struct AccountRowTests {
+    @Test func eachGroupListsTheLocalLoginThenConnectedAccounts() {
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        let claude = [
+            ClaudeAccountEntry(uuid: "uuid-b", label: "bo…@example.com"),
+            ClaudeAccountEntry(uuid: "uuid-c", label: nil, disconnected: true),
+        ]
+        // uuid-c was added this session: no provider until the next launch.
+        let rows = AccountRow.rows(family: .claude, registered: [.claude, b, .codex], claude: claude, codex: [])
+        #expect(rows.map(\.name) == ["Claude", "Claude bo…@example.com", "Claude 3"])
+        #expect(rows.map(\.code) == ["CLA", "CL2", "CL3"])
+        #expect(rows.map(\.kind) == [.local, .connected(disconnected: false), .pendingRelaunch])
+        #expect(rows[1].claudeUUID == "uuid-b")
+
+        let codexSlot = ProviderID.codexAccount(slot: "codex-1111111")
+        let codex = AccountRow.rows(family: .codex, registered: [.codex, codexSlot], claude: claude,
+                                    codex: [CodexAccountEntry(slot: "codex-1111111", accountID: "x", label: nil, disconnected: true)])
+        #expect(codex.map(\.kind) == [.local, .connected(disconnected: true)])
+        #expect(codex[1].codexSlot == "codex-1111111")
+
+        // Cursor, Copilot, Gemini: only the tool's own login, with a reason.
+        #expect(AccountRow.rows(family: .cursor, registered: [.cursor], claude: claude, codex: []).map(\.kind) == [.local])
+        for family in [ProviderID.cursor, .copilot, .gemini] {
+            #expect(!AccountCapability.canAddAccounts(family))
+            #expect(AccountCapability.unavailableReason(family)?.hasPrefix("One account only:") == true)
+        }
+        #expect(AccountCapability.canAddAccounts(.claude) && AccountCapability.unavailableReason(.claude) == nil)
+    }
+
+    @Test func connectedClaudeAccountsGetTheirOwnStableAccent() {
+        let b = ProviderID.claudeConnected(uuid: "uuid-b")
+        #expect(PulseColor.accent(b) == PulseColor.accent(.claudeConnected(uuid: "uuid-b")))
+        #expect(PulseColor.accent(b) != PulseColor.accent(.claudeConnected(uuid: "uuid-zz")))
+    }
+}

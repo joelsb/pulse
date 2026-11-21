@@ -92,9 +92,9 @@ enum PulseColor {
         if id != .claude, id.isClaudeAccount {
             return claudeAccountAccent(for: id)
         }
-        // Extra Codex accounts (JSB-112): same hashed rotation, so each keeps
+        // Connected Claude and Codex accounts (JSB-112): same hashed rotation, so each keeps
         // its own colour across launches.
-        if id.isCodexAccount {
+        if id.isConnectedAccount {
             return claudeAccountAccent(for: id)
         }
         // A ProviderID is no longer a closed enum, so this switch cannot be

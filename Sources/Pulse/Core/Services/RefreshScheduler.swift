@@ -44,9 +44,10 @@ final class RefreshScheduler {
         }
     }
 
-    /// Reconciles running loops with the enabled-provider set (Settings toggles).
+    /// Reconciles running loops with Settings: a provider shown in the panel
+    /// OR the menu bar icon keeps refreshing (JSB-112).
     func syncLoops() {
-        let enabled = Set(settings.enabledProviders)
+        let enabled = Set(settings.refreshedProviders)
         for (id, task) in loops where !enabled.contains(id) {
             task.cancel()
             loops[id] = nil
@@ -59,7 +60,7 @@ final class RefreshScheduler {
     /// Immediate refresh of all (or providers older than `ifOlderThan`).
     func refreshAll(ifOlderThan age: TimeInterval = 0) {
         let now = Date.now
-        for provider in providers where settings.enabledProviders.contains(provider.id) {
+        for provider in providers where settings.refreshedProviders.contains(provider.id) {
             let last = store.record(for: provider.id).lastSuccess ?? .distantPast
             guard now.timeIntervalSince(last) >= age else { continue }
             Task { await self.refresh(provider) }

@@ -85,10 +85,22 @@ struct ClaudeAccount: Sendable, Equatable {
     ///    turn off by hand.
     /// 3. **The primary is always included**, even when absent, so the tab does
     ///    not silently vanish on a machine where Claude Code is not set up yet.
+    /// The Mac's own Claude Code login (`~/.claude`), the first Claude
+    /// account. Since JSB-112 the only one read from disk: further accounts
+    /// are connected in Settings > Accounts, never discovered from
+    /// `~/.claude-*` directories (which are left untouched).
+    static func primary(
+        home: URL = AppPaths.home,
+        jcodeAccounts: [JcodeAccountRef] = jcodeAccountRefs()
+    ) -> ClaudeAccount {
+        discover(home: home, fileManager: FileManager(), jcodeAccounts: jcodeAccounts, includeDirectories: false)[0]
+    }
+
     static func discover(
         home: URL = AppPaths.home,
         fileManager: FileManager = .default,
-        jcodeAccounts: [JcodeAccountRef] = jcodeAccountRefs()
+        jcodeAccounts: [JcodeAccountRef] = jcodeAccountRefs(),
+        includeDirectories: Bool = true
     ) -> [ClaudeAccount] {
         let primaryDir = home.appendingPathComponent(".claude")
         let primaryIdentity = oauthIdentity(configDir: primaryDir)
@@ -101,6 +113,8 @@ struct ClaudeAccount: Sendable, Equatable {
             accountUUID: primaryIdentity?.uuid,
             email: primaryIdentity?.email
         )
+
+        if !includeDirectories { return [primary] }
 
         // NOT `.skipsHiddenFiles`: every Claude config dir starts with a dot,
         // so that option finds exactly zero accounts. Subdirectories are
