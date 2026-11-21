@@ -166,18 +166,39 @@ actor CodexAccounts {
         return store
     }
 
+    static let signInAgainHint = "Sign in again from Settings"
+
+    /// A response fetched within this window is reused: the Codex tab's
+    /// Accounts card and the account's own menu bar provider then cost one
+    /// `wham/usage` request per refresh, not two.
+    private static let reuseWindow: TimeInterval = 60
+    private var recent: [String: (at: Date, response: CodexUsageResponse, label: String?)] = [:]
+
+    func hasGrant(slot: String) async -> Bool {
+        await store(for: slot).hasGrant()
+    }
+
+    /// One extra account's live usage, read with that account's own grant.
+    func usage(slot: String, now: Date = .now) async throws -> (response: CodexUsageResponse, label: String?) {
+        if let cached = recent[slot], now.timeIntervalSince(cached.at) < Self.reuseWindow, cached.at <= now {
+            return (cached.response, cached.label)
+        }
+        guard let credentials = await store(for: slot).credentials() else {
+            throw ProviderFetchError.notLoggedIn(hint: Self.signInAgainHint)
+        }
+        let auth = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID)
+        let response = try await fetchUsage(auth)
+        recent[slot] = (now, response, auth.accountLabel)
+        return (response, auth.accountLabel)
+    }
+
     /// One row per extra account, each read with that account's own grant.
     func usages(now: Date = .now) async -> [AccountUsage] {
         var rows: [AccountUsage] = []
         for entry in index.load() {
             let label = entry.label ?? "Account \(rows.count + 2)"
-            guard let credentials = await store(for: entry.slot).credentials() else {
-                rows.append(AccountUsage(id: entry.slot, label: label, note: "Sign in again from Settings"))
-                continue
-            }
-            let auth = CodexAuth(accessToken: credentials.accessToken, accountID: credentials.accountID)
             do {
-                let windows = CodexUsageAPI.limitWindows(from: try await fetchUsage(auth), now: now)
+                let windows = CodexUsageAPI.limitWindows(from: try await usage(slot: entry.slot, now: now).response, now: now)
                 rows.append(AccountUsage(id: entry.slot, label: label, session: windows.primary, weekly: windows.secondary))
             } catch {
                 let message = (error as? ProviderFetchError)?.userMessage ?? "Usage unavailable"
@@ -185,5 +206,59 @@ actor CodexAccounts {
             }
         }
         return rows
+    }
+}
+
+/// One extra Codex account as its own provider (JSB-112), so it gets a tab,
+/// a menu bar block and history exactly like a discovered Claude account.
+/// Limits only: local session logs cannot tell which account spent them, so
+/// token history stays on the main Codex tab.
+actor CodexAccountProvider: UsageProvider {
+    nonisolated let id: ProviderID
+    nonisolated let descriptor: ProviderDescriptor
+    private let slot: String
+    private let accounts: CodexAccounts
+
+    init(entry: CodexAccountEntry, position: Int, accounts: CodexAccounts) {
+        self.id = .codexAccount(slot: entry.slot)
+        self.slot = entry.slot
+        self.accounts = accounts
+        self.descriptor = ProviderDescriptor(
+            id: .codexAccount(slot: entry.slot),
+            name: "Codex \(entry.label ?? String(position))",
+            // The main account is CDX; extras count on from 2, as in "Codex 2".
+            shortCode: "CD\(position)",
+            appBundleID: "com.openai.chat",
+            webURL: URL(string: "https://chatgpt.com/codex")!,
+            setupHint: CodexAccounts.signInAgainHint
+        )
+    }
+
+    /// Providers for the indexed accounts, in index order, numbered from 2.
+    static func make(entries: [CodexAccountEntry], accounts: CodexAccounts) -> [CodexAccountProvider] {
+        entries.enumerated().map { CodexAccountProvider(entry: $1, position: $0 + 2, accounts: accounts) }
+    }
+
+    func probeConnection() async -> ProviderConnection {
+        await accounts.hasGrant(slot: slot) ? .available : .notConnected(hint: descriptor.setupHint)
+    }
+
+    func fetch() async throws -> UsageSnapshot {
+        let now = Date.now
+        let (response, label) = try await accounts.usage(slot: slot, now: now)
+        var snapshot = UsageSnapshot(providerID: id, fetchedAt: now)
+        let windows = CodexUsageAPI.limitWindows(from: response, now: now)
+        snapshot.primary = windows.primary
+        snapshot.secondary = windows.secondary
+        snapshot.limitsCapturedAt = now
+        snapshot.plan = response.planType.map(CodexAuth.planDisplayName)
+        snapshot.accountLabel = label
+        if let credits = CodexUsageAPI.creditsNote(from: response) {
+            snapshot.statusNotes.append(credits)
+        }
+        if snapshot.primary == nil && snapshot.secondary == nil {
+            throw ProviderFetchError.dataUnavailable(description: "No Codex usage data for this account yet.")
+        }
+        return snapshot
     }
 }

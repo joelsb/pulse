@@ -1,6 +1,6 @@
 # 0003. Extra Codex accounts ride the one Codex provider, one Keychain slot each
 
-Status: Accepted (JSB-112)
+Status: Partly superseded by [0004](0004-each-codex-account-is-its-own-provider.md) (JSB-112) - the storage, slot and add-flow rules here stand; "ride one provider" does not.
 
 ## Decision
 

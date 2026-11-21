@@ -286,7 +286,10 @@ final class SettingsStore {
         )
     }
 
-    init(defaults: UserDefaults = .standard) {
+    /// - Parameter providers: every provider this launch knows, in display
+    ///   order. Defaults to the live registry; tests pass their own list so
+    ///   they never have to mutate the process-wide one.
+    init(defaults: UserDefaults = .standard, providers: [ProviderID] = ProviderID.allCases) {
         self.defaults = defaults
 
         let storedInterval = defaults.double(forKey: Key.refreshInterval)
@@ -297,18 +300,18 @@ final class SettingsStore {
         // rejected explicitly against the live registry, or a provider that
         // was removed (or an account whose directory is gone) is resurrected
         // from UserDefaults on every launch.
-        let known = Set(ProviderID.allCases)
+        let known = Set(providers)
         if let raw = defaults.stringArray(forKey: Key.enabledProviders) {
             let ids = Set(raw.map(ProviderID.init(rawValue:)).filter(known.contains))
-            enabledProviders = ProviderID.allCases.filter(ids.contains)
+            enabledProviders = providers.filter(ids.contains)
         } else {
-            enabledProviders = ProviderID.allCases
+            enabledProviders = providers
         }
 
         if let raw = defaults.stringArray(forKey: Key.menuBarProviders) {
             menuBarProviders = Set(raw.map(ProviderID.init(rawValue:)).filter(known.contains))
         } else {
-            menuBarProviders = Set(ProviderID.allCases)
+            menuBarProviders = Set(providers)
         }
 
         menuBarStyle = defaults.string(forKey: Key.menuBarStyle)
@@ -383,15 +386,15 @@ final class SettingsStore {
                 .map(ProviderID.init(rawValue:))
         )
         if !previouslyKnown.isEmpty {
-            let introduced = ProviderID.allCases.filter { !previouslyKnown.contains($0) }
+            let introduced = providers.filter { !previouslyKnown.contains($0) }
             let autoEnabled = introduced.filter { !$0.isClaudeAccount || $0 == .claude }
             if !autoEnabled.isEmpty {
                 let enabled = Set(enabledProviders).union(autoEnabled)
-                enabledProviders = ProviderID.allCases.filter(enabled.contains)
+                enabledProviders = providers.filter(enabled.contains)
                 menuBarProviders.formUnion(autoEnabled)
             }
         }
-        defaults.set(ProviderID.allCases.map(\.rawValue), forKey: Key.knownProviders)
+        defaults.set(providers.map(\.rawValue), forKey: Key.knownProviders)
         // Ids no longer in the registry are dropped above on read, but nothing
         // rewrites the stored array, so a stale id would survive every launch
         // and reappear the moment its directory did.

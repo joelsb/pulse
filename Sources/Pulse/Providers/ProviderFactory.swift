@@ -15,21 +15,31 @@ enum ProviderFactory {
     ///   `CodexProvider` reads from.
     /// - Parameter codexAccounts: JSB-112's extra Codex accounts, shared with
     ///   Settings for the same reason.
+    /// - Parameter codexAccountEntries: the indexed extra accounts; each
+    ///   becomes its own provider right after Codex, like a Claude account.
     static func makeAll(
         captureTitles: Bool = true,
         pulseOAuthStore: PulseOAuthStore = PulseOAuthStore(),
         codexOAuthStore: CodexOAuthStore = CodexOAuthStore(),
-        codexAccounts: CodexAccounts? = nil
+        codexAccounts: CodexAccounts? = nil,
+        codexAccountEntries: [CodexAccountEntry] = [],
+        registry: ProviderRegistry = .shared
     ) -> [any UsageProvider] {
         // Claude accounts are discovered from ~/.claude* at launch, so the
         // registry has to learn about them before anything reads allCases
         // (tab order, settings, menu bar).
         let accounts = ClaudeAccount.discover()
-        ProviderRegistry.shared.register(claudeAccounts: accounts.map(\.id))
+        let codexProviders = codexAccounts.map {
+            CodexAccountProvider.make(entries: codexAccountEntries, accounts: $0)
+        } ?? []
+        registry.register(claudeAccounts: accounts.map(\.id), codexAccounts: codexProviders.map(\.id))
 
         return accounts.map { ClaudeProvider(account: $0, pulseOAuthStore: pulseOAuthStore, captureTitles: captureTitles) }
             + [
                 CodexProvider(codexOAuthStore: codexOAuthStore, accounts: codexAccounts),
+            ]
+            + codexProviders
+            + [
                 CursorProvider(),
                 CopilotProvider(),
                 GeminiProvider(),

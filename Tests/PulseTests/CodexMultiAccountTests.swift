@@ -403,6 +403,125 @@ private struct BlindExistsStore: CodexSecretStore {
     func exists(service: String, account: String) async throws -> Bool { throw KeychainReader.Failure.accessDeniedOrTimeout }
 }
 
+// MARK: - Menu bar parity with Claude accounts
+
+@Suite("Codex extra accounts in the menu bar (JSB-112)")
+@MainActor
+struct CodexAccountMenuBarTests {
+    /// Tracer: an indexed extra account becomes its own provider exactly like
+    /// a discovered Claude account - its own id spliced after Codex, its own
+    /// short code, its own figures, and a menu bar slot by default.
+    @Test func extraCodexAccountIsItsOwnMenuBarProvider() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let slot = CodexAccounts.slot(forAccountID: "acct-B")
+        let entry = CodexAccountEntry(slot: slot, accountID: "acct-B", label: "bo…@example.com")
+        CodexAccountIndex(defaults: fixture.defaults).save([entry])
+        let credentials = CodexOAuthStore.Credentials(accessToken: tokenB, refreshToken: "RT-B", expiresAt: farFuture, accountID: "acct-B")
+        try await fixture.secrets.write(service: "de.byte.pulse.codex-oauth", account: slot, secret: CodexOAuthStore.encode(credentials))
+        let fetcher = Fixture.fetcher([tokenA: usage(session: 10, weekly: 20), tokenB: usage(session: 40, weekly: 70)])
+        let accounts = fixture.accounts(primary: fixture.primaryStore(fetcher: fetcher), fetcher: fetcher)
+
+        let id = ProviderID.codexAccount(slot: slot)
+        #expect(id.rawValue == "codexAccount.\(slot)")
+        #expect(id.isCodexAccount)
+        #expect(!id.isClaudeAccount)
+        #expect(ProviderRegistry.ordered(claudeAccounts: [.claudeAccount(suffix: "work")], codexAccounts: [id]) == [
+            .claude, .claudeAccount(suffix: "work"), .codex, id, .cursor, .copilot, .gemini,
+        ])
+
+        let providers = CodexAccountProvider.make(entries: CodexAccountIndex(defaults: fixture.defaults).load(), accounts: accounts)
+        #expect(providers.map(\.id) == [id])
+        let provider = try #require(providers.first)
+        #expect(provider.descriptor.shortCode == "CD2")
+        #expect(provider.descriptor.name == "Codex bo…@example.com")
+        #expect(await provider.probeConnection() == .available)
+        let snapshot = try await provider.fetch()
+        #expect(snapshot.providerID == id)
+        #expect(snapshot.primary?.utilization == 40)
+        #expect(snapshot.secondary?.utilization == 70)
+        #expect(snapshot.accountLabel == "bo…@example.com")
+
+        // Settings: an account Joel added himself gets a menu bar slot, unlike
+        // a discovered Claude directory (which starts off).
+        let suite = "pulse-tests-settings-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(ProviderID.builtIns.map(\.rawValue), forKey: "knownProviders")
+        let registry = ProviderRegistry()
+        registry.register(claudeAccounts: [], codexAccounts: [id])
+        let settings = SettingsStore(defaults: defaults, providers: registry.all)
+        #expect(settings.visibleMenuBarProviders.contains(id))
+        #expect(ProviderGlanceCard.windows(for: { var s = UsageSnapshot(providerID: id); s.secondary = snapshot.secondary; return s }()).ring == nil)
+    }
+
+    /// The account's own provider and the Codex tab's Accounts card read the
+    /// same account in one refresh: one usage request, not two. A provider
+    /// without a grant reads as not connected, never as another account.
+    @Test func menuBarProviderAndAccountsCardShareOneRequest() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let slot = "codex-1111111"
+        CodexAccountIndex(defaults: fixture.defaults).save([
+            CodexAccountEntry(slot: slot, accountID: "acct-B", label: "bo…@example.com"),
+            CodexAccountEntry(slot: "codex-2222222", accountID: "acct-C", label: "ca…@example.com"),
+        ])
+        try await fixture.secrets.write(service: "de.byte.pulse.codex-oauth", account: slot, secret: CodexOAuthStore.encode(
+            CodexOAuthStore.Credentials(accessToken: tokenB, refreshToken: "RT-B", expiresAt: farFuture, accountID: "acct-B")))
+        let calls = RefreshLog()
+        let inner = Fixture.fetcher([tokenB: usage(session: 40, weekly: 70)])
+        let counting: @Sendable (CodexAuth) async throws -> CodexUsageResponse = { auth in
+            await calls.append(auth.accessToken)
+            return try await inner(auth)
+        }
+        let accounts = fixture.accounts(primary: fixture.primaryStore(fetcher: inner), fetcher: counting)
+        let providers = CodexAccountProvider.make(entries: CodexAccountIndex(defaults: fixture.defaults).load(), accounts: accounts)
+
+        #expect(try await providers[0].fetch().primary?.utilization == 40)
+        let rows = await accounts.usages()
+        #expect(rows.map { $0.session?.utilization } == [40, nil])
+        #expect(await calls.tokens == [tokenB])
+
+        #expect(await providers[1].probeConnection() == .notConnected(hint: "Sign in again from Settings"))
+        await #expect(throws: ProviderFetchError.notLoggedIn(hint: "Sign in again from Settings")) {
+            try await providers[1].fetch()
+        }
+    }
+
+    /// Like a Claude account, an extra Codex account has its own stable accent
+    /// so its tab dot is told apart from the main Codex one.
+    @Test func extraCodexAccountHasItsOwnStableAccent() {
+        let id = ProviderID.codexAccount(slot: "codex-1111111")
+        #expect(PulseColor.accent(id) != PulseColor.accent(.codex))
+        #expect(PulseColor.accent(id) == PulseColor.accent(.codexAccount(slot: "codex-1111111")))
+        // Two extra accounts never share the fallback colour.
+        #expect(PulseColor.accent(id) != PulseColor.accent(.codexAccount(slot: "codex-2222222")))
+    }
+
+    /// Launch wiring: the factory builds one provider per indexed account,
+    /// right after Codex, and registers their ids so tabs and menu bar see them.
+    @Test func factoryBuildsAndRegistersOneProviderPerIndexedAccount() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let entries = [
+            CodexAccountEntry(slot: "codex-1111111", accountID: "acct-B", label: "bo…@example.com"),
+            CodexAccountEntry(slot: "codex-2222222", accountID: "acct-C", label: nil),
+        ]
+        let fetcher = Fixture.fetcher([:])
+        let accounts = fixture.accounts(primary: fixture.primaryStore(fetcher: fetcher), fetcher: fetcher)
+        let registry = ProviderRegistry()
+
+        let providers = ProviderFactory.makeAll(codexAccounts: accounts, codexAccountEntries: entries, registry: registry)
+        let ids = providers.map(\.id)
+        let b = ProviderID.codexAccount(slot: "codex-1111111"), c = ProviderID.codexAccount(slot: "codex-2222222")
+        let codexIndex = try #require(ids.firstIndex(of: .codex))
+        #expect(Array(ids[codexIndex...].prefix(3)) == [.codex, b, c])
+        #expect(providers.first { $0.id == c }?.descriptor.shortCode == "CD3")
+        #expect(providers.first { $0.id == c }?.descriptor.name == "Codex 3")
+        #expect(registry.all.filter(\.isCodexAccount) == [b, c])
+    }
+}
+
 private actor RefreshLog {
     private(set) var tokens: [String] = []
     func append(_ token: String) { tokens.append(token) }

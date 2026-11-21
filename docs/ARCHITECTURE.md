@@ -39,7 +39,7 @@ failures degrade to a stale badge instead of blanking the panel.
 | Provider | Limits source | Tokens/cost source | Auth |
 |---|---|---|---|
 | Claude | `api.anthropic.com/api/oauth/usage` (flat windows + structured `limits` array; Fable only in the latter) | `~/.claude/projects/**/*.jsonl`, plus the harnesses billing the same account — `~/.jcode/sessions/session_*.json` and `~/.pi/agent/sessions/**/*.jsonl` — + pricing table | Keychain "Claude Code-credentials" via `/usr/bin/security` (stable ACL grant), file fallback |
-| Codex | `chatgpt.com/backend-api/wham/usage` (fallback: newest session JSONL `rate_limits`) | `~/.codex/sessions/**` cumulative `token_count` deltas | Pulse's Keychain grant `codex-primary`, then `~/.codex/auth.json`, jcode, pi; extra accounts in their own Keychain slots, listed in UserDefaults `codexExtraAccounts`, one Accounts row each (ADR-0003) |
+| Codex | `chatgpt.com/backend-api/wham/usage` (fallback: newest session JSONL `rate_limits`) | `~/.codex/sessions/**` cumulative `token_count` deltas | Pulse's Keychain grant `codex-primary`, then `~/.codex/auth.json`, jcode, pi; extra accounts in their own Keychain slots, listed in UserDefaults `codexExtraAccounts`; each is its own `CodexAccountProvider` (`codexAccount.<slot>`, tab + menu bar block `CD2`, `CD3`...) and a row in the Codex tab's Accounts card (ADR-0003, ADR-0004) |
 | Cursor | `cursor.com` usage + dashboard APIs | `get-aggregated-usage-events` / `get-filtered-usage-events` | JWT from `state.vscdb` (read-only, immutable mode) → `WorkosCursorSessionToken` cookie |
 | Gemini | `cloudcode-pa.googleapis.com` `loadCodeAssist` + `retrieveUserQuota` | n/a (quota-only tab) | `~/.gemini/oauth_creds.json`, in-memory refresh only |
 

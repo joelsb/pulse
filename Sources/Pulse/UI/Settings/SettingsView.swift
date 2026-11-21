@@ -58,7 +58,7 @@ struct SettingsView: View {
 
             Section {
                 ForEach(ProviderID.allCases) { id in
-                    providerRow(id, subtitle: claudeAccountSubtitle(id))
+                    providerRow(id, subtitle: claudeAccountSubtitle(id) ?? codexAccountSubtitle(id))
                 }
             } header: {
                 Text("Providers")
@@ -265,6 +265,13 @@ struct SettingsView: View {
         return "~/.claude-\(suffix) · \(statusLine(record: record, descriptor: descriptor))"
     }
 
+    /// An extra Codex account (JSB-112) says it is one, ahead of its status.
+    private func codexAccountSubtitle(_ id: ProviderID) -> String? {
+        guard id.isCodexAccount else { return nil }
+        let record = store.record(for: id)
+        return "Added Codex account · \(statusLine(record: record, descriptor: environment.descriptor(for: id)))"
+    }
+
     private func statusLine(record: ProviderRecord, descriptor: ProviderDescriptor) -> String {
         switch record.displayState {
         case .data:
@@ -457,9 +464,15 @@ private struct CodexAddAccountButton: View {
     private var statusLabel: some View {
         switch phase {
         case .added(let label):
-            Text(label.map { "Added \($0)" } ?? "Account added")
+            // Like a new Claude account directory, a new Codex account gets
+            // its own tab and menu bar slot at the next launch.
+            Text((label.map { "Added \($0)" } ?? "Account added") + " - relaunch for its menu bar slot")
                 .font(.system(size: 10))
                 .foregroundStyle(PulseColor.ok)
+                .lineLimit(2)
+                .frame(maxWidth: 170, alignment: .trailing)
+            Button("Relaunch", action: Self.relaunch)
+                .controlSize(.small)
         case .duplicate(let label):
             Text(label.map { "\($0) is already tracked" } ?? "Already tracked")
                 .font(.system(size: 10))
@@ -472,6 +485,16 @@ private struct CodexAddAccountButton: View {
                 .frame(maxWidth: 160, alignment: .trailing)
         case .idle, .working:
             EmptyView()
+        }
+    }
+
+    /// Starts a fresh instance of this app, then quits this one.
+    private static func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+            guard error == nil else { return }
+            DispatchQueue.main.async { NSApp.terminate(nil) }
         }
     }
 

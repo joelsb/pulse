@@ -34,7 +34,12 @@ final class AppEnvironment {
         // which persisted ids are still valid, so an empty registry at that
         // moment silently discards every discovered account and rewrites
         // UserDefaults without them.
-        ProviderRegistry.shared.register(claudeAccounts: ClaudeAccount.discover().map(\.id))
+        // Same for extra Codex accounts (JSB-112), read from their index.
+        let codexAccountEntries = CodexAccountIndex().load()
+        ProviderRegistry.shared.register(
+            claudeAccounts: ClaudeAccount.discover().map(\.id),
+            codexAccounts: codexAccountEntries.map { .codexAccount(slot: $0.slot) }
+        )
 
         let settings = SettingsStore()
         let store = UsageStore()
@@ -51,7 +56,8 @@ final class AppEnvironment {
             captureTitles: settings.useSessionTitles,
             pulseOAuthStore: pulseOAuthStore,
             codexOAuthStore: codexOAuthStore,
-            codexAccounts: codexAccounts
+            codexAccounts: codexAccounts,
+            codexAccountEntries: codexAccountEntries
         )
 
         self.settings = settings

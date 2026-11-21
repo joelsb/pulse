@@ -54,6 +54,21 @@ struct ProviderID: RawRepresentable, Codable, Sendable, Hashable, Identifiable, 
         ProviderID(rawValue: "\(claudeAccountPrefix)\(suffix)")
     }
 
+    /// Prefix marking an extra Codex account added from Settings (JSB-112),
+    /// e.g. `codexAccount.codex-b0d45d6` for Keychain slot `codex-b0d45d6`.
+    static let codexAccountPrefix = "codexAccount."
+
+    /// Id for an extra Codex account stored in Keychain slot `slot`.
+    static func codexAccount(slot: String) -> ProviderID {
+        ProviderID(rawValue: "\(codexAccountPrefix)\(slot)")
+    }
+
+    /// Whether this id is an extra Codex account (never `.codex` itself).
+    var isCodexAccount: Bool { rawValue.hasPrefix(Self.codexAccountPrefix) }
+
+    /// `.codex` or one of its extra accounts: same limits, same layout rules.
+    var isCodexFamily: Bool { self == .codex || isCodexAccount }
+
     static func < (lhs: ProviderID, rhs: ProviderID) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
@@ -72,7 +87,8 @@ final class ProviderRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [ProviderID] = ProviderID.builtIns
 
-    private init() {}
+    /// Tests build their own registry instead of mutating `shared`.
+    init() {}
 
     var all: [ProviderID] {
         lock.lock()
@@ -80,20 +96,42 @@ final class ProviderRegistry: @unchecked Sendable {
         return storage
     }
 
+    private var claudeAccounts: [ProviderID] = []
+    private var codexAccounts: [ProviderID] = []
+
     /// Splices discovered Claude accounts in immediately after `.claude`, so
     /// the account tabs sit together and ahead of the other providers.
-    /// Idempotent: calling it twice with the same accounts is a no-op.
+    /// Idempotent: calling it twice with the same accounts is a no-op. Keeps
+    /// the Codex accounts already registered.
     func register(claudeAccounts: [ProviderID]) {
         lock.lock()
         defer { lock.unlock() }
+        self.claudeAccounts = claudeAccounts
+        storage = Self.ordered(claudeAccounts: claudeAccounts, codexAccounts: codexAccounts)
+    }
+
+    /// Both account families at once (JSB-112): extra Codex accounts sit right
+    /// after `.codex`, the same way Claude accounts follow `.claude`.
+    func register(claudeAccounts: [ProviderID], codexAccounts: [ProviderID]) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.claudeAccounts = claudeAccounts
+        self.codexAccounts = codexAccounts
+        storage = Self.ordered(claudeAccounts: claudeAccounts, codexAccounts: codexAccounts)
+    }
+
+    /// Canonical display order: each built-in followed by its own accounts.
+    static func ordered(claudeAccounts: [ProviderID], codexAccounts: [ProviderID]) -> [ProviderID] {
         var ordered: [ProviderID] = []
         for builtIn in ProviderID.builtIns {
             ordered.append(builtIn)
             if builtIn == .claude {
                 ordered.append(contentsOf: claudeAccounts.filter { $0 != .claude })
+            } else if builtIn == .codex {
+                ordered.append(contentsOf: codexAccounts.filter(\.isCodexAccount))
             }
         }
-        storage = ordered
+        return ordered
     }
 }
 

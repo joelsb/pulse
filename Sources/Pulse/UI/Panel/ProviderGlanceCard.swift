@@ -47,7 +47,7 @@ struct ProviderGlanceCard: View {
     /// is reported. Other providers still promote weekly-only data to the ring.
     static func windows(for snapshot: UsageSnapshot) -> (ring: LimitWindow?, bar: LimitWindow?) {
         if let primary = snapshot.primary { return (primary, snapshot.secondary) }
-        if snapshot.providerID == .codex { return (nil, snapshot.secondary) }
+        if snapshot.providerID.isCodexFamily { return (nil, snapshot.secondary) }
         return (snapshot.secondary, nil)
     }
 
